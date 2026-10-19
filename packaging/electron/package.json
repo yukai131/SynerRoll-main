@@ -1,0 +1,10 @@
+{
+  "name": "synerroll-launcher",
+  "version": "0.1.0",
+  "description": "SynerRoll 综合能源优化建模工作台",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  }
+}

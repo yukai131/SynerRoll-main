@@ -111,6 +111,7 @@ const TASK_CONTEXTS_LOCK = ReentrantLock()
 
 # 订阅者列表的锁（每个 ctx 自己的锁，但用一个全局简单点）
 const SUBSCRIBERS_LOCK = ReentrantLock()
+const TASK_EVENT_BUFFER = 32
 
 """
     broadcast_event(ctx::TaskContext, event::Dict)
@@ -121,18 +122,18 @@ const SUBSCRIBERS_LOCK = ReentrantLock()
 避免求解主循环被慢订阅者阻塞。
 """
 function broadcast_event(ctx::TaskContext, event::Dict)
-    subs = lock(SUBSCRIBERS_LOCK) do
-        copy(ctx.subscribers)
-    end
-    for ch in subs
-        try
-            # 有缓冲且已满时直接丢弃，避免 put! 阻塞求解主循环
-            if isbuffered(ch) && length(ch) >= ch.sz_max
-                continue
+    # 同时保护容量检查与发布，多个发布者不能在检查后把队列填满。
+    lock(SUBSCRIBERS_LOCK) do
+        for ch in ctx.subscribers
+            try
+                # isbuffered 未导出，Channel 也不支持 length；旧写法被 catch 静默吞掉了。
+                if !isopen(ch) || Base.n_avail(ch) >= TASK_EVENT_BUFFER
+                    continue
+                end
+                put!(ch, event)
+            catch error
+                error isa InvalidStateException || @warn "Task event delivery failed" task_id=ctx.id exception=error
             end
-            put!(ch, event)
-        catch
-            # channel 已关闭，订阅者断了
         end
     end
     return nothing
@@ -144,7 +145,7 @@ end
 新建一个订阅 channel，加入 ctx.subscribers 列表。订阅者关闭 channel 时自动从列表移除。
 """
 function subscribe(ctx::TaskContext)::Channel
-    ch = Channel{Dict{String, Any}}(32)  # buffered，避免慢订阅者阻塞任务
+    ch = Channel{Dict{String, Any}}(TASK_EVENT_BUFFER)
     lock(SUBSCRIBERS_LOCK) do
         push!(ctx.subscribers, ch)
     end

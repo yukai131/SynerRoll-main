@@ -5,7 +5,7 @@ using HTTP
 
 # backend/data 绝对路径（不依赖 CWD）
 # 所有 project / task / boundary DB 都建在这里
-const BACKEND_DATA_DIR = joinpath(@__DIR__, "..", "data")
+const BACKEND_DATA_DIR = abspath(get(ENV, "SYNERROLL_DATA_DIR", joinpath(@__DIR__, "..", "data")))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 请求参数解析

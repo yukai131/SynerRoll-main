@@ -4,10 +4,16 @@ using SHA
 mutable struct PlanningContext
     signal_ch::Channel{Symbol}
     julia_task::Union{Task,Nothing}
+    process::Union{Base.Process,Nothing}
+    cancel_requested::Threads.Atomic{Bool}
+    launching::Threads.Atomic{Bool}
 end
+PlanningContext(signal_ch::Channel{Symbol}, julia_task::Union{Task,Nothing}) =
+    PlanningContext(signal_ch, julia_task, nothing, Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false))
 
 const PLANNING_CONTEXTS = Dict{String,PlanningContext}()
 const PLANNING_CONTEXTS_LOCK = ReentrantLock()
+const PLANNING_WORKER_SLOTS = Base.Semaphore(1)
 
 function _planning_dict(value, field::String)
     value isa AbstractDict || error("$(field) 必须是对象")
@@ -57,7 +63,7 @@ end
 
 function _normalize_economics_config(raw)
     config = _planning_dict(raw, "economics")
-    evaluator = string(get(config, "evaluator", OPERATING_OBJECTIVE_EVALUATOR_VERSION))
+    evaluator = string(get(config, "evaluator", DEFAULT_CAPACITY_EVALUATOR_VERSION))
     objective = string(get(config, "objective", "operating-cost-min"))
     objective in CAPACITY_PLAN_OBJECTIVES || error("不支持的方案目标: $(objective)")
 
@@ -128,13 +134,14 @@ function _normalize_economics_config(raw)
         "objective" => objective,
         "technicalConstraints" => constraints,
         "economicConstraints" => economic_constraints,
+        "lifecycle" => _planning_dict(get(config, "lifecycle", Dict{String,Any}()), "economics.lifecycle"),
         "extensions" => Dict{String,Any}(string(key) => value for (key, value) in raw_extensions),
     )
     economic_evaluator_from_config(result)
     return result
 end
 
-function _normalize_clustering_config(raw, project_id::String)
+function _normalize_clustering_config(raw, project_id::String, canvas_id::String="")
     config = _planning_dict(raw, "clustering")
     dataset_id = String(strip(string(get(config, "datasetId", ""))))
     # 允许 datasetId 为空（草稿状态，后续步骤中补充）
@@ -144,6 +151,9 @@ function _normalize_clustering_config(raw, project_id::String)
     algorithm in ("kmeans", "kmedoids") || error("clustering.algorithm 只能是 kmeans 或 kmedoids")
     return Dict{String,Any}(
         "projectId" => project_id,
+        "canvasId" => canvas_id,
+        "preserveExtremes" => get(config, "preserveExtremes", true) == true,
+        "scenarioPreviewHash" => get(config, "scenarioPreviewHash", nothing),
         "datasetId" => isempty(dataset_id) ? nothing : dataset_id,
         "featureIds" => feature_ids,
         "clusterCount" => Int(get(config, "clusterCount", 0)),
@@ -152,6 +162,36 @@ function _normalize_clustering_config(raw, project_id::String)
         "missingDayThreshold" => Float64(get(config, "missingDayThreshold", 0.05)),
         "seed" => Int(get(config, "seed", 20260828)),
         "representative" => string(get(config, "representative", "nearest-observation")),
+    )
+end
+
+"""
+    _planning_computable_snapshot(snapshot) -> Dict{String,Any}
+
+提取参与计算的快照子集（params_hash 语义，对齐 01-开发文档/05-数据结构与接口契约 §4）：
+仅保留画布 id/nodes/edges 与 boundaries、layerConfig、algorithm、solverConfig 等计算字段，
+剔除 viewport、display、画布名称、updateTime 等 UI/非计算字段，
+保证相同计算输入得到唯一 snapshotHash（画布视口拖动、重命名不再使 hash 变化）。
+"""
+function _planning_computable_snapshot(snapshot::AbstractDict)
+    workspace_src = get(snapshot, "workspace", Dict{String,Any}())
+    canvases = Dict{String,Any}[]
+    for canvas in get(workspace_src, "canvases", [])
+        push!(canvases, Dict{String,Any}(
+            "id" => get(canvas, "id", ""),
+            "nodes" => get(canvas, "nodes", []),
+            "edges" => get(canvas, "edges", []),
+        ))
+    end
+    return Dict{String,Any}(
+        "id" => get(snapshot, "id", ""),
+        "schemaVersion" => get(snapshot, "schemaVersion", ""),
+        "workspace" => Dict{String,Any}("canvases" => canvases),
+        "boundaries" => get(snapshot, "boundaries", []),
+        "layerConfig" => get(snapshot, "layerConfig", Dict{String,Any}()),
+        "algorithm" => get(snapshot, "algorithm", Dict{String,Any}()),
+        "solverConfig" => get(snapshot, "solverConfig", Dict{String,Any}()),
+        "fittingModels" => get(snapshot, "fittingModels", []),
     )
 end
 
@@ -166,16 +206,16 @@ function create_capacity_planning!(request::AbstractDict)
     variables_raw = get(request, "variables", nothing)
     variables_raw isa AbstractVector || error("variables 必须是数组")
     variables = validate_capacity_variables(snapshot, canvas_id, variables_raw)
-    clustering = _normalize_clustering_config(get(request, "clustering", nothing), project_id)
+    clustering = _normalize_clustering_config(get(request, "clustering", nothing), project_id, canvas_id)
     optimizer = _normalize_optimizer_config(get(request, "optimizer", Dict()))
-    economics = _normalize_economics_config(get(request, "economics", Dict("evaluator" => OPERATING_OBJECTIVE_EVALUATOR_VERSION)))
+    economics = _normalize_economics_config(get(request, "economics", Dict("evaluator" => DEFAULT_CAPACITY_EVALUATOR_VERSION)))
     planning_layer_id = string(get(request, "planningLayerId", "1"))
     _planning_layer(snapshot, planning_layer_id)
 
     project_updated_at = string(get(snapshot, "updateTime", ""))
     isempty(project_updated_at) && error("项目快照缺少 updateTime")
     snapshot_json = JSON3.write(snapshot)
-    snapshot_hash = bytes2hex(SHA.sha256(Vector{UInt8}(codeunits(snapshot_json))))
+    snapshot_hash = bytes2hex(SHA.sha256(Vector{UInt8}(codeunits(JSON3.write(_planning_computable_snapshot(snapshot))))))
     config = Dict{String,Any}(
         "variables" => variables,
         "clustering" => clustering,
@@ -203,38 +243,106 @@ function create_capacity_planning!(request::AbstractDict)
     return get_planning_task(planning_id)
 end
 
-function start_capacity_planning!(planning_id::String)
+function planning_worker_command(planning_id::String)
+    script = normpath(joinpath(@__DIR__, "..", "..", "capacity_worker.jl"))
+    project = Base.active_project()
+    command = project === nothing ?
+        `$(Base.julia_cmd()) --startup-file=no --threads=1 $script $planning_id` :
+        `$(Base.julia_cmd()) --startup-file=no --project=$(dirname(project)) --threads=1 $script $planning_id`
+    return addenv(Cmd(command; windows_hide=true), "SYNERROLL_DATA_DIR"=>BACKEND_DATA_DIR, "SYNERROLL_CAPACITY_WORKER"=>"1")
+end
+
+function _mark_planning_cancelled!(planning_id::String)
     task = get_planning_task(planning_id)
-    task === nothing && error("规划任务不存在: $(planning_id)")
-    task["status"] == "draft" || error("只有 draft 状态可以启动，当前为 $(task["status"])")
-    set_planning_status!(planning_id, "queued")
-    ctx = PlanningContext(Channel{Symbol}(1), nothing)
-    lock(PLANNING_CONTEXTS_LOCK) do
-        PLANNING_CONTEXTS[planning_id] = ctx
-    end
-    # COPT 求解是阻塞调用，放到 Julia worker thread，避免占住 Oxygen 的 HTTP 事件循环。
-    worker = Threads.@spawn begin
-        try
-            perf_start("planning", planning_id)
-            perf_measure("planning", planning_id, "planning_total") do
-                run_capacity_optimization!(planning_id, ctx)
+    progress = Dict{String,Any}(task["progress"])
+    merge!(progress, Dict("phase"=>"cancelled", "cancellationRequested"=>false, "currentScenario"=>nothing))
+    update_planning_progress!(planning_id, progress)
+    set_planning_status!(planning_id, "cancelled")
+end
+
+function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, command::Cmd, timeout_seconds::Real)
+    process = nothing
+    log = nothing
+    timed_out = false
+    Base.acquire(PLANNING_WORKER_SLOTS)
+    try
+        ctx.launching[] = true
+        ctx.cancel_requested[] && return _mark_planning_cancelled!(planning_id)
+        directory = joinpath(planning_task_dir(planning_id), "logs")
+        mkpath(directory)
+        log = open(joinpath(directory, "worker.log"), "a")
+        process = run(pipeline(command; stdout=log, stderr=log); wait=false)
+        lock(PLANNING_CONTEXTS_LOCK) do
+            ctx.process = process
+        end
+        launched_at = time()
+        deadline = launched_at + timeout_seconds
+        heartbeat_at = launched_at
+        while process_running(process)
+            if ctx.cancel_requested[] || time() >= deadline
+                timed_out = !ctx.cancel_requested[]
+                kill(process) # only this task's child; never the shared HTTP backend
+                break
             end
-        catch error
-            if error isa PlanningCancelled
-                set_planning_status!(planning_id, "cancelled")
-            else
-                code = error isa CapacityPlanningError ? error.code : "PLANNING_FAILED"
-                message = error isa CapacityPlanningError ? error.message : sprint(showerror, error)
-                set_planning_status!(planning_id, "failed"; error_code=code, error_message=message)
-                @error "capacity planning failed" planning_id exception=(error, catch_backtrace())
+            if time() - heartbeat_at >= 1.0
+                update_planning_elapsed!(planning_id, round(Int, (time() - launched_at)*1000))
+                heartbeat_at = time()
             end
-        finally
-            perf_finish("planning", planning_id)
-            lock(PLANNING_CONTEXTS_LOCK) do
-                pop!(PLANNING_CONTEXTS, planning_id, nothing)
+            sleep(0.1)
+        end
+        wait(process) # release all native solver/file handles before publishing a terminal state
+        if ctx.cancel_requested[]
+            _mark_planning_cancelled!(planning_id)
+        elseif timed_out
+            current = get_planning_task(planning_id)
+            if current["status"] != "completed"
+                try
+                    complete_planning_from_evaluations!(planning_id;
+                        stop_reason="已达到规划总时限，停止未完成求解，返回已完整评价候选中的最佳方案。")
+                catch error
+                    set_planning_status!(planning_id, "failed"; error_code="PLANNING_TIME_LIMIT",
+                        error_message="已达到规划总时限且尚无完整可行候选；未完成场景已终止。")
+                end
+            end
+        else
+            current = get_planning_task(planning_id)
+            if !(current["status"] in PLANNING_TERMINAL_STATUSES)
+                set_planning_status!(planning_id, "failed"; error_code="WORKER_EXITED",
+                    error_message="容量规划工作进程提前退出，详情见任务 logs/worker.log（退出码 $(process.exitcode)）。")
             end
         end
+    catch error
+        if ctx.cancel_requested[]
+            _mark_planning_cancelled!(planning_id)
+        else
+            set_planning_status!(planning_id, "failed"; error_code="WORKER_FAILED", error_message=sprint(showerror, error))
+        end
+    finally
+        if process !== nothing && process_running(process)
+            kill(process)
+            wait(process)
+        end
+        log !== nothing && close(log)
+        lock(PLANNING_CONTEXTS_LOCK) do
+            get(PLANNING_CONTEXTS, planning_id, nothing) === ctx && pop!(PLANNING_CONTEXTS, planning_id)
+        end
+        Base.release(PLANNING_WORKER_SLOTS)
     end
+end
+
+function start_capacity_planning!(planning_id::String; worker_command::Union{Nothing,Cmd}=nothing)
+    ctx = PlanningContext(Channel{Symbol}(1), nothing)
+    task = lock(PLANNING_CONTEXTS_LOCK) do
+        task = get_planning_task(planning_id)
+        task === nothing && error("规划任务不存在: $(planning_id)")
+        task["status"] == "draft" || error("只有 draft 状态可以启动，当前为 $(task["status"])")
+        set_planning_status!(planning_id, "queued")
+        PLANNING_CONTEXTS[planning_id] = ctx
+        task
+    end
+    timeout_seconds = Float64(get(task["config"]["optimizer"], "maxTimeSeconds", 86400.0))
+    command = worker_command === nothing ? planning_worker_command(planning_id) : worker_command
+    worker = @async _supervise_planning_worker!(planning_id, ctx, command, timeout_seconds)
     ctx.julia_task = worker
     return get_planning_task(planning_id)
 end
@@ -247,13 +355,21 @@ function cancel_capacity_planning!(planning_id::String)
         set_planning_status!(planning_id, "cancelled")
         return get_planning_task(planning_id)
     end
-    delivered = lock(PLANNING_CONTEXTS_LOCK) do
+    ctx = lock(PLANNING_CONTEXTS_LOCK) do
         ctx = get(PLANNING_CONTEXTS, planning_id, nothing)
-        ctx === nothing && return false
-        isready(ctx.signal_ch) || put!(ctx.signal_ch, :cancel)
-        return true
+        ctx === nothing && return nothing
+        ctx.cancel_requested[] = true
+        return ctx
     end
-    delivered || set_planning_status!(planning_id, "cancelled")
+    ctx === nothing && error("该任务没有可控的工作进程，请重启旧版后端以终止遗留求解")
+    progress = Dict{String,Any}(get_planning_task(planning_id)["progress"])
+    progress["cancellationRequested"] = true
+    update_planning_progress!(planning_id, progress)
+    if ctx.process === nothing && !ctx.launching[]
+        _mark_planning_cancelled!(planning_id)
+    end
+    # The supervisor observes the atomic request within its 100 ms polling loop;
+    # it is the sole owner of kill/wait, avoiding double-kill and exit races.
     return get_planning_task(planning_id)
 end
 

@@ -38,7 +38,10 @@ end
 @post "/api/capacity-planning/scenarios/preview" function (req)
     try
         body = JSON3.read(req.body, Dict)
-        data = reduce_boundary_scenarios(body)
+        canvas_id = require_string(body, "canvasId")
+        project_json = get(body, "projectJson", nothing)
+        project_json isa AbstractDict || return json_error("缺少 projectJson（项目快照）")
+        data = reduce_boundary_scenarios(body, canvas_id, project_json)
         return json_success(data = data)
     catch e
         @error "典型场景聚类失败" exception=(e, catch_backtrace())
@@ -99,6 +102,14 @@ end
     end
 end
 
+@get "/api/capacity-planning/{id}/comparison" function (req, id)
+    try
+        return json_success(data = build_planning_comparison(String(id)))
+    catch error
+        return json_error("生成方案比较失败: $(sprint(showerror, error))")
+    end
+end
+
 @get "/api/capacity-planning/{id}" function (req, id)
     try
         task = get_planning_task(String(id))
@@ -133,7 +144,7 @@ end
         if haskey(body, "clustering")
             clustering = get(body, "clustering", nothing)
             if clustering isa AbstractDict
-                new_config["clustering"] = _normalize_clustering_config(clustering, task["projectId"])
+                new_config["clustering"] = _normalize_clustering_config(clustering, task["projectId"], task["canvasId"])
             end
         end
 

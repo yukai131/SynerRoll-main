@@ -20,6 +20,7 @@ import {
 } from '~~/utils/display-window'
 import { useTaskApi } from '~~/composables/api/useTaskApi'
 import { useTaskWebSocket } from '~~/composables/api/useTaskWebSocket'
+import { createTaskRequestGate } from '~~/utils/task-refresh'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
 import { useToastCenter } from '~~/state/ui'
 import { parseVariableKey, getVariableDisplayName } from '~~/config/component-meta'
@@ -82,6 +83,7 @@ const activeSection = ref<string>('overview')
 // ───── 当前选中的任务 ─────
 const selectedTaskId = ref<string | null>(null)
 const selectedTask = ref<ComputeTask | null>(null)
+let selectedTaskGeneration = 0
 /** 创建后立刻出壳，后台补齐项目/灵活性 */
 const resultShellLoading = ref(false)
 const currentProject = ref<Project | null>(null)
@@ -141,11 +143,14 @@ const connectionData = ref<BusConnection[]>([])
 const energyFlowDisplayMode = ref<EnergyFlowDisplayMode>('balance')
 
 const loadConnectionData = async (taskId: string) => {
+  const selection = selectedTaskGeneration
   try {
     const res = await taskApi.getConnection(taskId)
+    if (selection !== selectedTaskGeneration) return
     connectionData.value = Array.isArray(res) ? res : []
   }
   catch (e) {
+    if (selection !== selectedTaskGeneration) return
     console.warn('[EnergyFlow] loadConnectionData error:', e)
     connectionData.value = []
   }
@@ -235,7 +240,7 @@ function getChartDeviceColorKey(key: string): string {
 
 // ───── 数据轮询 ─────
 let wsHandle: { close: () => void; send: (m: object) => void } | null = null
-const liveData = ref<Record<string, Record<string, { ts: string; value: number }[]>>>({})
+const liveData = shallowRef<Record<string, Record<string, { ts: string; value: number }[]>>>({})
 const liveDataUnits = ref<Record<string, string>>({})
 /** 全局版本：liveData 整体替换时的信号（能流/设备出力等） */
 const liveDataVersion = ref(0)
@@ -243,7 +248,7 @@ const liveDataVersion = ref(0)
 const liveDataVersions = ref<Record<string, number>>({})
 const liveDataMaxMinutes = ref(0)
 const liveStatus = ref<string>('')
-const flexibilityData = ref<TaskFlexibilityResponse | null>(null)
+const flexibilityData = shallowRef<TaskFlexibilityResponse | null>(null)
 const flexibilityLoading = ref(false)
 const flexibilityError = ref('')
 
@@ -255,6 +260,20 @@ const economySelectedLayer = ref<string>('')
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let pollingGeneration = 0
+const resultRequests = createTaskRequestGate()
+const liveResultCursor = ref(0)
+let liveHasMore = false
+let liveReadSucceeded = false
+let flexRevision = 0
+let flexVersioned = false
+const flexPeriodIndex = new Map<string, number>()
+let flexPeriodRows: Array<Record<string, unknown>> = []
+let flexFlushTimer: ReturnType<typeof setTimeout> | null = null
+let pendingFlexEvents: Array<{ revision: number; rows: Array<Record<string, unknown>> }> = []
+let lastFlexEventAt = 0
+const flexCommitTimes = new Map<number, number>()
+let boundaryLoadedRange: { start: number; end: number } | null = null
+let boundaryTimer: ReturnType<typeof setTimeout> | null = null
 
 const flexibilityConfig = computed<FlexibilityTaskConfig | null>(() => {
   const config = flexibilityData.value?.config
@@ -483,67 +502,88 @@ function flexPeriodKey(row: Record<string, unknown>): string {
 }
 
 function mergeFlexibilityPeriods(
-  existing: Array<Record<string, unknown>> | undefined,
   incoming: Array<Record<string, unknown>> | undefined
 ): Array<Record<string, unknown>> {
-  const map = new Map<string, Record<string, unknown>>()
-  for (const row of existing ?? []) {
-    map.set(flexPeriodKey(row), row)
-  }
   for (const row of incoming ?? []) {
-    map.set(flexPeriodKey(row), row)
+    const key = flexPeriodKey(row)
+    const index = flexPeriodIndex.get(key)
+    if (index === undefined) {
+      flexPeriodIndex.set(key, flexPeriodRows.length)
+      flexPeriodRows.push(row)
+    } else flexPeriodRows[index] = row
     const tsMin = Number(row.timestamp_minutes)
     const tsLabel = String(row.timestamp ?? '')
     const m = Number.isFinite(tsMin) && tsMin > 0 ? tsMin : timeLabelToMinutes(tsLabel)
     if (Number.isFinite(m) && m > flexMaxMinutes) flexMaxMinutes = m
   }
-  return [...map.values()]
+  return flexPeriodRows.slice()
 }
 
-const reloadFlexibility = async (taskId: string, options: { silent?: boolean } = {}) => {
-  if (!options.silent) {
-    flexibilityLoading.value = true
-    flexibilityError.value = ''
-  }
-  const t0 = performance.now()
-  try {
-    // 首次拉全量 periods；之后按 flexMaxMinutes 增量，前端 merge 保留历史
-    const minMinutes = flexHistoryLoaded && flexMaxMinutes > 0
-      ? Math.max(0, flexMaxMinutes - 24 * 60)
-      : undefined
-    const data = await taskApi.getFlexibility(taskId, undefined, minMinutes)
-    if (selectedTaskId.value !== taskId) return
-    const mergedPeriods = mergeFlexibilityPeriods(
-      flexibilityData.value?.periods as Array<Record<string, unknown>> | undefined,
-      (data as { periods?: Array<Record<string, unknown>> }).periods
-    )
-    flexibilityData.value = {
-      ...(data as Record<string, unknown>),
-      periods: mergedPeriods,
-      summaries: (data as { summaries?: unknown[] }).summaries
-        ?? flexibilityData.value?.summaries
-        ?? [],
-    } as typeof flexibilityData.value
-    flexHistoryLoaded = true
-    flexibilityError.value = ''
-    const fp = (data as { probe?: Record<string, number | string> })?.probe
-    if (fp) probeAcc.lastFlexProbe = fp
-  }
-  catch (error) {
-    if (selectedTaskId.value !== taskId) return
-    if (!options.silent || !flexibilityData.value) {
-      flexibilityData.value = null
+const reloadFlexibility = (taskId: string, options: { silent?: boolean } = {}) => {
+  const generation = pollingGeneration
+  return resultRequests.run('flex|' + taskId + '|' + generation, async () => {
+    const current = () => selectedTaskId.value === taskId && generation === pollingGeneration
+    if (!current()) return
+    if (!options.silent) { flexibilityLoading.value = true; flexibilityError.value = '' }
+    const t0 = performance.now()
+    try {
+      const data = await taskApi.getFlexibility(taskId, undefined, undefined,
+        flexHistoryLoaded && flexVersioned ? flexRevision : undefined)
+      if (!current() || (data.versioned && (data.revision ?? 0) < flexRevision)) return
+      if (data.reset) { flexPeriodIndex.clear(); flexPeriodRows = []; flexMaxMinutes = 0 }
+      const incoming = data.periods as unknown as Array<Record<string, unknown>>
+      const periods = incoming.length || data.reset
+        ? mergeFlexibilityPeriods(incoming)
+        : flexibilityData.value?.periods ?? []
+      const summariesChanged = JSON.stringify(data.summaries) !== JSON.stringify(flexibilityData.value?.summaries)
+      flexRevision = data.revision ?? 0
+      flexVersioned = data.versioned === true
+      if (!flexibilityData.value || incoming.length || data.reset || summariesChanged) {
+        flexibilityData.value = { ...data, periods } as TaskFlexibilityResponse
+      }
+      flexHistoryLoaded = true
+      flexibilityError.value = ''
+      if (data.probe) probeAcc.lastFlexProbe = data.probe as Record<string, number | string>
+      flushFlexibilityEvents(taskId)
+    } catch (error) {
+      if (!current()) return
       flexibilityError.value = error instanceof Error ? error.message : String(error)
-    }
-    else {
       console.warn('[Poll] reloadFlexibility error:', error)
+    } finally {
+      probeAcc.flexMs += performance.now() - t0
+      if (current()) flexibilityLoading.value = false
     }
+  })
+}
+
+/** WS 直接使用已提交的变化点；版本缺口交给只读增量接口补齐。 */
+function flushFlexibilityEvents(taskId: string): void {
+  if (selectedTaskId.value !== taskId || !pendingFlexEvents.length) return
+  if (!flexHistoryLoaded || !flexVersioned) {
+    void reloadFlexibility(taskId, { silent: true })
+    return
   }
-  finally {
-    probeAcc.flexMs += performance.now() - t0
-    if (!options.silent && selectedTaskId.value === taskId) {
-      flexibilityLoading.value = false
-    }
+  pendingFlexEvents.sort((a, b) => a.revision - b.revision)
+  const rows: Array<Record<string, unknown>> = []
+  let nextRevision = flexRevision
+  const remaining: typeof pendingFlexEvents = []
+  for (const event of pendingFlexEvents) {
+    if (event.revision <= nextRevision) continue
+    if (event.revision !== nextRevision + 1) { remaining.push(event); continue }
+    rows.push(...event.rows)
+    nextRevision = event.revision
+  }
+  pendingFlexEvents = remaining
+  if (rows.length && flexibilityData.value) {
+    const periods = mergeFlexibilityPeriods(rows)
+    flexRevision = nextRevision
+    flexibilityData.value = { ...flexibilityData.value, periods, revision: flexRevision } as TaskFlexibilityResponse
+  }
+  if (remaining.length && !flexFlushTimer) {
+    flexFlushTimer = setTimeout(() => {
+      flexFlushTimer = null
+      if (selectedTaskId.value === taskId) void reloadFlexibility(taskId, { silent: true })
+    }, 500)
   }
 }
 
@@ -611,14 +651,18 @@ const economyLayerPieItems = computed(() => {
   return result
 })
 
-const reloadEconomy = async (taskId: string, options: { silent?: boolean } = {}) => {
+const reloadEconomy = (taskId: string, options: { silent?: boolean } = {}) => {
+  const generation = pollingGeneration
+  return resultRequests.run('economy|' + taskId + '|' + generation, async () => {
+  const t0 = performance.now()
+  if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
   if (!options.silent) {
     economyLoading.value = true
     economyError.value = ''
   }
   try {
     const data = await taskApi.getEconomy(taskId)
-    if (selectedTaskId.value !== taskId) return
+    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
     economyData.value = data
     economyError.value = ''
     if (!economySelectedLayer.value && data.layers?.length) {
@@ -626,7 +670,7 @@ const reloadEconomy = async (taskId: string, options: { silent?: boolean } = {})
     }
   }
   catch (error) {
-    if (selectedTaskId.value !== taskId) return
+    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
     if (!options.silent || !economyData.value) {
       economyData.value = null
       economyError.value = error instanceof Error ? error.message : String(error)
@@ -636,10 +680,12 @@ const reloadEconomy = async (taskId: string, options: { silent?: boolean } = {})
     }
   }
   finally {
-    if (!options.silent && selectedTaskId.value === taskId) {
+    probeAcc.econMs += performance.now() - t0
+    if (!options.silent && selectedTaskId.value === taskId && generation === pollingGeneration) {
       economyLoading.value = false
     }
   }
+  })
 }
 
 // ───── 轮询性能探测 ─────
@@ -652,14 +698,33 @@ const probeAcc = {
   econMs: 0,
   cycleMs: 0,
   rows: 0,
-  sentMinMinutes: -1,
+  sentCursor: 0,
   taskHead: -1,
-  stalePolls: 0,
   stateMs: 0,
   lastProbe: null as null | Record<string, number | string>,
   lastFlexProbe: null as null | Record<string, number | string>,
   lastLogAt: 0,
+  renderedCharts: 0,
+  renderPrepareMs: 0,
+  renderPaintMaxMs: 0,
+  paintedCursor: 0,
+  flexPaintedRevision: 0,
+  commitToPaintMaxMs: 0,
 }
+const onChartRendered = (event: Event) => {
+  const detail = (event as CustomEvent<{ prepareMs: number; paintMs: number; version: number; channel: string }>).detail
+  probeAcc.renderedCharts++
+  probeAcc.renderPrepareMs += detail.prepareMs
+  probeAcc.renderPaintMaxMs = Math.max(probeAcc.renderPaintMaxMs, detail.paintMs)
+  if (detail.channel === 'series') probeAcc.paintedCursor = Math.max(probeAcc.paintedCursor, detail.version)
+  else {
+    probeAcc.flexPaintedRevision = Math.max(probeAcc.flexPaintedRevision, detail.version)
+    const committedAt = flexCommitTimes.get(detail.version)
+    if (committedAt) probeAcc.commitToPaintMaxMs = Math.max(probeAcc.commitToPaintMaxMs, Date.now() - committedAt)
+  }
+}
+onMounted(() => window.addEventListener('synerroll:chart-render', onChartRendered))
+onBeforeUnmount(() => window.removeEventListener('synerroll:chart-render', onChartRendered))
 const probeLog = (force = false) => {
   const now = performance.now()
   if (!force && now - probeAcc.lastLogAt < 2000) return
@@ -674,23 +739,22 @@ const probeLog = (force = false) => {
     ` | econ_avg=${(probeAcc.econMs / n).toFixed(0)}ms` +
     ` | cycle_avg=${(probeAcc.cycleMs / n).toFixed(0)}ms` +
     ` | rows_last=${probeAcc.rows}` +
-    ` | julia_lock=${p.lock_wait_ms ?? '-'}ms` +
-    ` | julia_query=${p.query_ms ?? '-'}ms` +
-    ` | julia_build=${p.build_ms ?? '-'}ms` +
-    ` | julia_ser=${p.serialize_est_ms ?? '-'}ms` +
-    ` | julia_total=${p.total_ms ?? '-'}ms` +
-    ` | bff=${p.bff_total_ms ?? '-'}ms` +
+    ` | bff_query=${p.query_ms ?? '-'}ms` +
+    ` | bff_build=${p.build_ms ?? '-'}ms` +
+    ` | bff_total=${p.total_ms ?? '-'}ms` +
     ` | series=${p.series_count ?? '-'}` +
     ` | raw_pts=${p.raw_point_count ?? '-'}` +
     ` | flex_parse=${fp.period_parse_ms ?? '-'}ms` +
     ` | flex_n=${fp.period_count ?? '-'}` +
-    ` | minMin_sent=${probeAcc.sentMinMinutes}` +
-    ` | minMin_srv=${p.min_minutes ?? '-'}` +
+    ` | cursor_sent=${probeAcc.sentCursor}` +
     ` | taskHead=${probeAcc.taskHead}` +
-    ` | stale=${probeAcc.stalePolls}` +
     ` | cur_time=${selectedTask.value?.cur_time ?? 'null'}` +
     ` | maxDevTs=${p.max_device_ts ?? '-'}` +
     ` | state_avg=${(probeAcc.stateMs / n).toFixed(0)}ms`
+    + ` | cursor_applied=${liveResultCursor.value} | cursor_painted=${probeAcc.paintedCursor}`
+    + ` | charts=${probeAcc.renderedCharts} | chart_prepare_avg=${(probeAcc.renderPrepareMs / Math.max(1, probeAcc.renderedCharts)).toFixed(0)}ms`
+    + ` | chart_finish_max=${probeAcc.renderPaintMaxMs.toFixed(0)}ms | flex_revision=${flexRevision}`
+    + ` | flex_painted=${probeAcc.flexPaintedRevision} | commit_to_paint_max=${probeAcc.commitToPaintMaxMs.toFixed(0)}ms`
   )
   probeAcc.cycles = 0
   probeAcc.getDataMs = 0
@@ -699,6 +763,10 @@ const probeLog = (force = false) => {
   probeAcc.econMs = 0
   probeAcc.cycleMs = 0
   probeAcc.stateMs = 0
+  probeAcc.renderedCharts = 0
+  probeAcc.renderPrepareMs = 0
+  probeAcc.renderPaintMaxMs = 0
+  probeAcc.commitToPaintMaxMs = 0
   probeAcc.lastLogAt = now
 }
 
@@ -726,10 +794,6 @@ function simHeadFromTask(): number {
 }
 
 /** stale 只看任务 cur_time；maxDevTs 会超前，不能当水位 */
-let staleHeadPolls = 0
-let lastTaskHead = 0
-let lastHeadChangeAt = 0
-let loadedBoundaryOnce = false
 
 
 /** 合并 rows 到 liveData（WS 推送与 getData 共用） */
@@ -792,15 +856,9 @@ function applyLiveRows(rows: Array<{
         idxMap.set(ts, arr.length)
         arr.push(point)
       } else {
-        let lo = 0
-        let hi = arr.length
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1
-          if (timeLabelToMinutes(arr[mid]!.ts) < m) lo = mid + 1
-          else hi = mid
-        }
-        arr.splice(lo, 0, point)
-        idxMap.set(ts, lo)
+        // 本批先追加，批末一次排序；中途 splice 会使 ts→index 失效。
+        idxMap.set(ts, arr.length)
+        arr.push(point)
         needsSort.add(slot)
       }
     }
@@ -838,7 +896,7 @@ function applyLiveRows(rows: Array<{
     const lid = slot.slice(sepPos + 1)
     const arr = merged[key]?.[lid]
     if (!arr) continue
-    next[key] = { ...next[key], [lid]: [...arr] }
+    next[key] = { ...next[key], [lid]: arr }
   }
   liveData.value = next
   if (unitsChanged) liveDataUnits.value = { ...units }
@@ -850,65 +908,95 @@ function applyLiveRows(rows: Array<{
   liveDataVersion.value++
 }
 
-const reloadLiveData = async (taskId: string) => {
-  const t0 = performance.now()
-  try {
-    const statusNow = liveStatus.value || selectedTask.value?.status || ''
-    const running = ['pending', 'parsing', 'building', 'solving'].includes(statusNow)
-    const taskHead = simHeadFromTask()
-
-    // 仅当 taskHead 在较长时间内不动才算 stale（不能每 200ms 轮询就 +1）
-    const nowMs = performance.now()
-    if (taskHead > lastTaskHead) {
-      staleHeadPolls = 0
-      lastTaskHead = taskHead
-      lastHeadChangeAt = nowMs
+const reloadLiveData = (taskId: string) => {
+  const generation = pollingGeneration
+  return resultRequests.run('live|' + taskId + '|' + generation, async () => {
+    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
+    const t0 = performance.now()
+    const sentCursor = liveResultCursor.value
+    probeAcc.sentCursor = sentCursor
+    liveReadSucceeded = false
+    try {
+      const data = await taskApi.getData(taskId, { afterId: sentCursor, skipBoundary: true, limit: 20000 })
+      if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
+      const t1 = performance.now()
+      liveReadSucceeded = true
+      probeAcc.getDataMs += t1 - t0
+      if ((data.latestCursor ?? sentCursor) < sentCursor) {
+        liveResultCursor.value = 0
+        liveDataIndex.clear()
+        liveData.value = {}
+        boundaryLoadedRange = null
+        liveHasMore = true
+        return
+      }
+      probeAcc.rows = data.rows.length
+      probeAcc.lastProbe = (data.probe ?? null) as Record<string, number | string> | null
+      probeAcc.taskHead = simHeadFromTask()
+      liveHasMore = data.hasMore === true
+      if (data.rows.length) applyLiveRows(data.rows)
+      liveResultCursor.value = data.cursor ?? sentCursor
+      probeAcc.mergeMs += performance.now() - t1
+    } catch (error) {
+      probeAcc.getDataMs += performance.now() - t0
+      console.warn('[Poll] reloadLiveData error:', error)
     }
-    else if (running && nowMs - lastHeadChangeAt > 3000) {
-      staleHeadPolls = Math.min(staleHeadPolls + 1, 2)
-    }
-
-    // 拉取窗口跟仿真进度 cur_time，而不是 max(ts)。
-    // 时层1会超前写出很长视野，若用 max(ts) 当水位会切掉细层进度点，前端就不刷新。
-    const head = taskHead
-    // 首次拉全量含边界；之后始终 skipBoundary
-    // stale 时只放宽到 48h，避免 7 天窗导致 rows 暴涨
-    const wideWindow = running && staleHeadPolls >= 2
-    const lookbackMin = wideWindow ? 48 * 60 : 24 * 60
-    const minMinutes = head > 0 ? Math.max(0, head - lookbackMin) : undefined
-    const skipBoundary = loadedBoundaryOnce
-    probeAcc.sentMinMinutes = minMinutes ?? -1
-    probeAcc.taskHead = taskHead
-    probeAcc.stalePolls = staleHeadPolls
-    const data = await taskApi.getData(taskId, {
-      ...(minMinutes !== undefined ? { minMinutes } : {}),
-      ...(skipBoundary ? { skipBoundary: true } : {}),
-    })
-    loadedBoundaryOnce = true
-    const t1 = performance.now()
-    probeAcc.getDataMs += t1 - t0
-    const rows = data?.rows ?? []
-    probeAcc.rows = rows.length
-    probeAcc.lastProbe = (data as { probe?: Record<string, number | string> })?.probe ?? null
-    if (rows.length) {
-      applyLiveRows(rows as any)
-    }
-    probeAcc.mergeMs += performance.now() - t1
-  }
-  catch (e) {
-    probeAcc.getDataMs += performance.now() - t0
-    console.warn('[Poll] reloadLiveData error:', e)
-  }
+  })
 }
+
+/** 边界只读取当前总览窗口；大范围分成 48h 小批次，数据保留在内存中可回看。 */
+const reloadBoundaryWindow = (taskId: string) => {
+  const generation = pollingGeneration
+  return resultRequests.run('boundary|' + taskId + '|' + generation, async () => {
+    const current = () => selectedTaskId.value === taskId && generation === pollingGeneration
+      && activeSection.value === 'overview'
+    while (current()) {
+      const start = Math.max(0, Math.floor(overviewDisplayWindow.value.start))
+      const end = Math.max(start + 1, Math.ceil(overviewDisplayWindow.value.end))
+      const loaded = boundaryLoadedRange
+      if (loaded && start >= loaded.start && end <= loaded.end) return
+      let from = start
+      let to = Math.min(end, from + 48 * 60)
+      if (loaded && start < loaded.end && end > loaded.start) {
+        if (start < loaded.start) to = Math.min(loaded.start, from + 48 * 60)
+        else { from = loaded.end; to = Math.min(end, from + 48 * 60) }
+      }
+      const data = await taskApi.getData(taskId, { boundaryOnly: true, minMinutes: from, maxMinutes: to })
+      if (!current()) return
+      // 建库/注入期间空结果不能标记为已加载，下一拍会重试。
+      if (!data.rows.length) return
+      applyLiveRows(data.rows)
+      boundaryLoadedRange = loaded && from <= loaded.end && to >= loaded.start
+        ? { start: Math.min(from, loaded.start), end: Math.max(to, loaded.end) }
+        : { start: from, end: to }
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    }
+  }).catch(error => console.warn('[Poll] boundary window error:', error))
+}
+
+function scheduleBoundaryWindow(): void {
+  if (boundaryTimer) clearTimeout(boundaryTimer)
+  const taskId = selectedTaskId.value
+  if (!taskId || activeSection.value !== 'overview') return
+  boundaryTimer = setTimeout(() => {
+    boundaryTimer = null
+    void reloadBoundaryWindow(taskId)
+  }, 250)
+}
+
+watch([selectedTaskId, activeSection, () => overviewDisplayWindow.value.start,
+  () => overviewDisplayWindow.value.end], scheduleBoundaryWindow)
 
 const startPolling = (taskId: string) => {
   stopPolling()
   liveDataMaxMinutes.value = 0
   simHeadMinutes = 0
-  staleHeadPolls = 0
-  lastTaskHead = 0
-  lastHeadChangeAt = 0
-  loadedBoundaryOnce = false
+  liveResultCursor.value = 0
+  probeAcc.paintedCursor = 0
+  probeAcc.flexPaintedRevision = 0
+  flexCommitTimes.clear()
+  liveHasMore = false
+  boundaryLoadedRange = null
   liveDataIndex.clear()
   liveData.value = {}
   liveDataUnits.value = {}
@@ -916,6 +1004,13 @@ const startPolling = (taskId: string) => {
   liveDataVersion.value++
   flexHistoryLoaded = false
   flexMaxMinutes = 0
+  flexRevision = 0
+  flexVersioned = false
+  flexPeriodIndex.clear()
+  flexPeriodRows = []
+  pendingFlexEvents = []
+  lastFlexEventAt = 0
+  scheduleBoundaryWindow()
   const generation = pollingGeneration
   let pending = false
   let lastFlexAt = 0
@@ -944,24 +1039,21 @@ const startPolling = (taskId: string) => {
       : Promise.resolve(selectedTask.value)
     const liveP = reloadLiveData(taskId)
     const now = performance.now()
-    const flexInterval = ['flexibility', 'device-flexibility'].includes(activeSection.value) ? 2000 : 5000
-    if (now - lastFlexAt >= flexInterval) {
+    const flexInterval = ['flexibility', 'device-flexibility'].includes(activeSection.value) ? 5000 : 15000
+    if (now - lastFlexAt >= flexInterval && now - lastFlexEventAt > 10000) {
       lastFlexAt = now
       void reloadFlexibility(taskId, { silent: true })
     }
     // 经济性评价支持运行中动态刷新；节流约 2s，避免每次 200ms 轮询都扫库
     const nowEcon = performance.now()
     const econInterval = 2000
-    const econP = (nowEcon - lastEconAt >= econInterval)
-      ? (async () => {
-          lastEconAt = nowEcon
-          const t = performance.now()
-          await reloadEconomy(taskId, { silent: true })
-          probeAcc.econMs += performance.now() - t
-        })()
-      : Promise.resolve()
+    if (activeSection.value === 'economy' && nowEcon - lastEconAt >= econInterval) {
+      lastEconAt = nowEcon
+      void reloadEconomy(taskId, { silent: true })
+    }
     const st = await stateP
-    await Promise.all([liveP, econP])
+    await liveP
+    scheduleBoundaryWindow()
     probeAcc.cycleMs += performance.now() - t0
     probeAcc.cycles += 1
     probeLog()
@@ -975,7 +1067,11 @@ const startPolling = (taskId: string) => {
     try {
       const task = await reloadResults()
       if (task && ['completed', 'failed', 'cancelled'].includes(task.status)) {
-        await reloadResults()
+        // 本轮状态与数据并行读取，数据快照可能早于最终提交；终态后再排空一次。
+        await reloadLiveData(taskId)
+        if (liveHasMore || !liveReadSucceeded) return
+        await reloadFlexibility(taskId, { silent: true })
+        if (activeSection.value === 'economy') void reloadEconomy(taskId, { silent: true })
         probeLog(true)
         shouldStop = true
         return
@@ -986,7 +1082,7 @@ const startPolling = (taskId: string) => {
       pending = false
       if (!shouldStop && generation === pollingGeneration && selectedTaskId.value === taskId) {
         // 固定 1s 节拍：本拍内攒齐增量再画；后端慢则自然变成 2~3s 一跳
-        const delay = Math.max(0, 1000 - (performance.now() - t0))
+        const delay = liveHasMore ? 0 : Math.max(0, 1000 - (performance.now() - t0))
         refreshTimer = setTimeout(poll, delay)
       }
     }
@@ -996,6 +1092,11 @@ const startPolling = (taskId: string) => {
 
 const stopPolling = () => {
   pollingGeneration += 1
+  if (boundaryTimer) clearTimeout(boundaryTimer)
+  boundaryTimer = null
+  if (flexFlushTimer) clearTimeout(flexFlushTimer)
+  flexFlushTimer = null
+  pendingFlexEvents = []
   if (refreshTimer) {
     clearTimeout(refreshTimer)
     refreshTimer = null
@@ -1027,7 +1128,29 @@ const subscribeTask = (taskId: string) => {
         selectedTask.value = { ...selectedTask.value, status: evt.status as ComputeTask['status'] }
       }
     }
-    else if (evt.type === 'flexibility' || evt.type === 'flexibility_summary') {
+    else if (evt.type === 'flexibility') {
+      if (selectedTaskId.value !== taskId) return
+      lastFlexEventAt = performance.now()
+      if (evt.revision === undefined) {
+        if (!flexFlushTimer) flexFlushTimer = setTimeout(() => {
+          flexFlushTimer = null
+          void reloadFlexibility(taskId, { silent: true })
+        }, 1000)
+        return
+      }
+      pendingFlexEvents.push({ revision: evt.revision, rows: evt.rows })
+      if (evt.committedAtMs) {
+        flexCommitTimes.set(evt.revision, evt.committedAtMs)
+        if (flexCommitTimes.size > 64) flexCommitTimes.delete(flexCommitTimes.keys().next().value!)
+      }
+      // 长时间切后台时让补查接口恢复，避免在浏览器积压无界事件队列。
+      if (pendingFlexEvents.length > 32) pendingFlexEvents = pendingFlexEvents.slice(-32)
+      if (!flexFlushTimer) flexFlushTimer = setTimeout(() => {
+        flexFlushTimer = null
+        flushFlexibilityEvents(taskId)
+      }, 250)
+    }
+    else if (evt.type === 'flexibility_summary') {
       void reloadFlexibility(taskId, { silent: true })
     }
     else if (evt.type === 'completed' || evt.type === 'failed' || evt.type === 'cancelled') {
@@ -1040,18 +1163,21 @@ const subscribeTask = (taskId: string) => {
       }
       void reloadLiveData(taskId)
       void reloadFlexibility(taskId, { silent: true })
-      stopPolling()
+      // 由主轮询排空最后的增量页后停止，不能截断收尾结果。
     }
   })
 }
 
 // ───── 加载项目详情 ─────
 const loadProject = async (projectId: string) => {
+  const selection = selectedTaskGeneration
   try {
     const res = await projectApi.getProject(projectId)
+    if (selection !== selectedTaskGeneration) return
     currentProject.value = res.project
   }
   catch (e) {
+    if (selection !== selectedTaskGeneration) return
     console.warn('[Result] loadProject error:', e)
     currentProject.value = null
   }
@@ -1059,6 +1185,7 @@ const loadProject = async (projectId: string) => {
 
 // ───── 选中任务 ─────
 const selectTask = async (taskId: string, options: { instantShell?: boolean } = {}) => {
+  const selection = ++selectedTaskGeneration
   selectedTaskId.value = taskId
   showTaskListDialog.value = false
   resultShellLoading.value = options.instantShell ?? false
@@ -1090,6 +1217,7 @@ const selectTask = async (taskId: string, options: { instantShell?: boolean } = 
 
   // 详情/项目/连接并行拉，不阻塞骨架屏
   const detailP = taskApi.getState(taskId).then((task) => {
+    if (selection !== selectedTaskGeneration) return null
     selectedTask.value = task
     return task
   }).catch((e) => {
@@ -1098,14 +1226,16 @@ const selectTask = async (taskId: string, options: { instantShell?: boolean } = 
   })
 
   void detailP.then((task) => {
+    if (selection !== selectedTaskGeneration) return
     if (task?.project_id) void loadProject(task.project_id)
-    void reloadEconomy(taskId, { silent: true })
+    if (activeSection.value === 'economy') void reloadEconomy(taskId, { silent: true })
   })
   void loadConnectionData(taskId)
   subscribeTask(taskId)
   startPolling(taskId)
   // 灵活性结果较重，后台拉；完成后再撤掉创建后的骨架遮罩
   void reloadFlexibility(taskId, { silent: true }).finally(() => {
+    if (selection !== selectedTaskGeneration) return
     resultShellLoading.value = false
   })
 }
@@ -1917,6 +2047,7 @@ const createTask = async () => {
                 <TaskSeriesChart
                   :layers="layers"
                   :data-version="liveDataVersions[String(key)] ?? 0"
+                  :result-cursor="liveResultCursor"
                   :title="getChartDisplayName(String(key))"
                   :device-color-key="getChartDeviceColorKey(String(key))"
                   :unit="liveDataUnits[String(key)] ?? 'kW'"
@@ -2001,6 +2132,7 @@ const createTask = async () => {
 
               <div v-if="flexibilityPeriods.length" class="grid gap-3">
                 <FlexibilityRequirementSourceChart
+                  :result-revision="flexibilityData?.revision ?? 0"
                   :key="selectedTask.id"
                   :rows="flexibilityPeriods"
                   :source="flexibilityConfig.requirementSource"
@@ -2012,6 +2144,7 @@ const createTask = async () => {
                   :sim-start-date="selectedTask.sim_start_date"
                 />
                 <FlexibilitySeriesChart
+                  :result-revision="flexibilityData?.revision ?? 0"
                   :rows="flexibilityPeriods"
                   :device-labels="codeToLabel"
                   direction="up"
@@ -2023,6 +2156,7 @@ const createTask = async () => {
                   :sim-start-date="selectedTask.sim_start_date"
                 />
                 <FlexibilitySeriesChart
+                  :result-revision="flexibilityData?.revision ?? 0"
                   :rows="flexibilityPeriods"
                   :device-labels="codeToLabel"
                   direction="down"
@@ -2076,6 +2210,7 @@ const createTask = async () => {
               <DeviceFlexibilityChart
                 v-for="device in deviceFlexibilityGroups"
                 :key="device.key"
+                :result-revision="flexibilityData?.revision ?? 0"
                 :title="device.label"
                 :device-type="device.deviceType"
                 :rows="device.rows"
@@ -2132,6 +2267,7 @@ const createTask = async () => {
                       :bus-label="`${bus.busLabel} · ${layer.label}`"
                       :variables="bus.variables"
                       :live-data="liveData"
+                      :result-cursor="liveResultCursor"
                       :layer-id="layer.value"
                       :code-to-label="codeToLabel"
                       :display-mode="energyFlowDisplayMode"

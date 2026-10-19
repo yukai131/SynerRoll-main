@@ -3,6 +3,7 @@
 using JSON3
 
 function _ensure_flexibility_result_tables!(store::SQLiteTimeSeriesStore)
+    store.flexibility_initialized && return nothing
     _exec(store.db, """
         CREATE TABLE IF NOT EXISTS flexibility_period_results (
             layer_id             TEXT NOT NULL,
@@ -17,6 +18,7 @@ function _ensure_flexibility_result_tables!(store::SQLiteTimeSeriesStore)
             direction            TEXT NOT NULL,
             requirement_source   TEXT NOT NULL,
             result_json          TEXT NOT NULL,
+            revision             INTEGER NOT NULL DEFAULT 0,
             updated_at           TEXT DEFAULT (datetime('now')),
             PRIMARY KEY (
                 layer_id, timestamp, case_id, application_type,
@@ -25,6 +27,13 @@ function _ensure_flexibility_result_tables!(store::SQLiteTimeSeriesStore)
             )
         )
     """)
+    columns = _query(store.db, "PRAGMA table_info(flexibility_period_results)")
+    if !("revision" in String.(columns[2]))
+        _exec(store.db, "ALTER TABLE flexibility_period_results ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+    end
+    _exec(store.db, "CREATE TABLE IF NOT EXISTS task_result_versions (kind TEXT PRIMARY KEY, version INTEGER NOT NULL)")
+    _exec(store.db, "INSERT OR IGNORE INTO task_result_versions(kind, version) VALUES ('flexibility', 0)")
+    _exec(store.db, "CREATE INDEX IF NOT EXISTS idx_flex_period_layer_revision ON flexibility_period_results(layer_id, revision)")
     _exec(
         store.db,
         "CREATE INDEX IF NOT EXISTS idx_flex_period_layer_time " *
@@ -62,6 +71,7 @@ function _ensure_flexibility_result_tables!(store::SQLiteTimeSeriesStore)
         "CREATE INDEX IF NOT EXISTS idx_flex_summary_layer " *
         "ON flexibility_summary_results(layer_id, start_minutes)",
     )
+    store.flexibility_initialized = true
     return nothing
 end
 
@@ -73,20 +83,22 @@ function persist_system_flexibility_period_results!(
     all(item -> item isa SystemFlexibilityMarginResult, margins) || throw(
         ArgumentError("margins must contain only SystemFlexibilityMarginResult values."),
     )
-    isempty(margins) && return nothing
+    isempty(margins) && return 0
     store = get_store(db_path)
-    lock(store.write_lock) do
+    return lock(store.write_lock) do
         _ensure_flexibility_result_tables!(store)
         _exec(store.db, "BEGIN IMMEDIATE")
         stmt = nothing
         try
+            _exec(store.db, "UPDATE task_result_versions SET version=version+1 WHERE kind='flexibility'")
+            revision = Int(_query(store.db, "SELECT version FROM task_result_versions WHERE kind='flexibility'")[1][1])
             stmt = DBInterface.prepare(store.db, """
                     INSERT INTO flexibility_period_results (
                         layer_id, timestamp, timestamp_minutes, next_timestamp,
                         case_id, application_type, operation_mode,
                         boundary_condition, poi_id, direction,
-                        requirement_source, result_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                        requirement_source, result_json, revision, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                     ON CONFLICT (
                         layer_id, timestamp, case_id, application_type,
                         operation_mode, boundary_condition, poi_id,
@@ -95,6 +107,7 @@ function persist_system_flexibility_period_results!(
                         timestamp_minutes=excluded.timestamp_minutes,
                         next_timestamp=excluded.next_timestamp,
                         result_json=excluded.result_json,
+                        revision=excluded.revision,
                         updated_at=datetime('now')
                 """)
             for margin in margins
@@ -114,9 +127,11 @@ function persist_system_flexibility_period_results!(
                     supply.direction,
                     requirement.requirement_source,
                     JSON3.write(row),
+                    revision,
                 ])
             end
             _exec(store.db, "COMMIT")
+            return revision
         catch error
             try
                 _exec(store.db, "ROLLBACK")
@@ -127,7 +142,6 @@ function persist_system_flexibility_period_results!(
             stmt === nothing || DBInterface.close!(stmt)
         end
     end
-    return nothing
 end
 
 function persist_system_flexibility_summary_results!(

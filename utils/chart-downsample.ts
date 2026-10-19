@@ -20,20 +20,22 @@ export function downsampleTimeSeries(
   let i = 0
   while (i < data.length && out.length < maxPoints) {
     let j = i
-    let minP = data[i]
-    let maxP = data[i]
-    const bucketEnd = data[i][0] + bucketSize
+    let minP = data[i]!
+    let maxP = data[i]!
+    const bucketEnd = data[i]![0] + bucketSize
 
-    while (j < data.length && data[j][0] < bucketEnd) {
-      const p = data[j]
+    while (j < data.length && data[j]![0] < bucketEnd) {
+      const p = data[j]!
       if (p[1] < minP[1]) minP = p
       if (p[1] > maxP[1]) maxP = p
       j++
     }
 
-    const last = data[j - 1]
-    for (const p of [data[i], minP, maxP, last]) {
-      if (!out.length || out[out.length - 1][0] !== p[0]) out.push(p)
+    const last = data[j - 1]!
+    // 极值必须按时间顺序发布，否则曲线会在桶内折返。
+    const bucket = [data[i]!, minP, maxP, last].sort((a, b) => a[0] - b[0])
+    for (const p of bucket) {
+      if (!out.length || out[out.length - 1]![0] !== p[0]) out.push(p)
     }
     i = j
   }

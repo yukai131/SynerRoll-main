@@ -114,6 +114,8 @@ function evaluate_snapshot(
     options::EvaluationOptions=EvaluationOptions(),
     planning_id::Union{Nothing,String}=nothing,
     optimizer_factory=nothing,
+    progress_callback::Function=info -> nothing,
+    cancel_check::Function=() -> false,
 )::EvaluationResult
     scenario_metrics = Dict{String,Any}[]
     try
@@ -139,7 +141,8 @@ function evaluate_snapshot(
 
         weighted_objective = 0.0
         total_weight_days = 0
-        for scenario in scenarios
+        for (scenario_index, scenario) in enumerate(scenarios)
+            cancel_check() && throw(PlanningCancelled("规划任务已取消"))
             scenario_id = string(get(scenario, "scenarioId", ""))
             isempty(scenario_id) && throw(CapacityPlanningError("SCENARIO_ID_MISSING", "典型场景缺少 scenarioId"))
             weight_days = Int(get(scenario, "weightDays", 0))
@@ -147,7 +150,12 @@ function evaluate_snapshot(
             scenario_dir = joinpath(work_dir, "scenarios", scenario_id)
             mkpath(scenario_dir)
             db_path = joinpath(scenario_dir, "timeseries.db")
+            scenario_started = time_ns()
+            report(stage) = progress_callback(Dict{String,Any}("index"=>scenario_index,
+                "count"=>length(scenarios), "id"=>scenario_id, "stage"=>stage,
+                "startedAt"=>string(Dates.now()), "elapsedMs"=>round(Int,(time_ns()-scenario_started)/1e6)))
             try
+                report("building")
                 scenario_meta = Dict{String,Any}("scenario_id" => scenario_id,
                     "weight_days" => weight_days, "layer_id" => options.layer_id)
                 perf_measure_db(db_path, "scenario_seed"; meta=scenario_meta) do
@@ -157,7 +165,7 @@ function evaluate_snapshot(
                 # 默认丢弃生成的代码文本，不向候选目录写 .jl 文件。
                 model, components, generated_code = perf_measure_db(db_path, "model_build";
                     meta=merge(scenario_meta, Dict("component_count" => length(component_dicts),
-                        "node_count" => length(nodes), "solver" => "COPT"))) do
+                        "node_count" => length(nodes), "solver" => get_solver_name(algorithms)))) do
                     build_model_tracked(
                         component_dicts, algorithms, nodes, layer, "0:00", db_path; all_layers,
                         optimizer_factory=optimizer_factory,
@@ -166,14 +174,23 @@ function evaluate_snapshot(
                 if options.generate_code
                     write(joinpath(scenario_dir, "model.jl"), generated_code)
                 end
+                cancel_check() && throw(PlanningCancelled("规划任务已取消"))
+                JuMP.set_time_limit_sec(model, options.scenario_time_limit_seconds)
+                report("solving")
                 solve_result = perf_measure_db(db_path, "solve_and_persist"; meta=scenario_meta) do
                     solve_model(
                         model, components, layer, "0:00", db_path;
-                        overlay_mode=false
+                        overlay_mode=false, allow_time_limit_solution=true
                     )
                 end
-                solve_result === nothing && throw(CapacityPlanningError("INFEASIBLE", "$(scenario_id) 求解未达到最优"))
+                if solve_result === nothing
+                    timed_out = JuMP.termination_status(model) == MOI.TIME_LIMIT
+                    throw(CapacityPlanningError(timed_out ? "SCENARIO_TIME_LIMIT" : "INFEASIBLE",
+                        timed_out ? "$(scenario_id) 达到单场景时限且没有可用可行解" : "$(scenario_id) 求解未达到最优"))
+                end
                 objective, _ = solve_result
+                solver_status = string(JuMP.termination_status(model))
+                report("completed")
                 # 求解完成后立即释放本轮 JuMP/COPT 模型与组件，降低连续多场景评价的内存/GC 压力
                 model = nothing
                 components = nothing
@@ -190,8 +207,11 @@ function evaluate_snapshot(
                     "operatingObjective" => objective,
                     "weightedOperatingObjective" => objective * weight_days,
                     "feasible" => true,
+                    "solverStatus" => solver_status,
+                    "optimal" => solver_status == "OPTIMAL",
                 ))
             catch error
+                error isa PlanningCancelled && rethrow()
                 bt = catch_backtrace()
                 @warn "容量规划场景评价失败" scenario_id weight_days exception=(error, bt)
                 push!(scenario_metrics, Dict{String,Any}(
@@ -224,6 +244,7 @@ function evaluate_snapshot(
             scenario_metrics=scenario_metrics,
         )
     catch error
+        error isa PlanningCancelled && rethrow()
         return _evaluation_failure(error; scenario_metrics)
     end
 end

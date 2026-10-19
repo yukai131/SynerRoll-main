@@ -69,9 +69,9 @@ function infer_julia_type(field_data::Dict{String,Any})
     elseif dv isa Bool
         return Bool
     elseif dv isa Integer && !(dv isa Bool)
-        # JSON3 会把 3.0 解析为 Int64(3)，用 step 的类型判断是否为浮点数
+        # JSON 整数写法不代表整数容量；带数值 step 的可调量按 Float64 处理。
         step = get(field_data, "step", nothing)
-        if step isa AbstractFloat
+        if step isa Real && !(step isa Bool)
             return Float64
         end
         return Int64

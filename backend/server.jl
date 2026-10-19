@@ -166,10 +166,12 @@ begin
 
     # 容量规划服务（后期加载，依赖 services）
     include("services/capacity_planning/simulation_evaluator.jl")
+    include("services/capacity_planning/lifecycle_economics.jl")
     include("services/capacity_planning/economic_evaluator.jl")
     include("services/capacity_planning/planning_store.jl")
     include("services/capacity_planning/optimization_runner.jl")
     include("services/capacity_planning/planning_manager.jl")
+    include("services/capacity_planning/comparison_summary.jl")
 
     # 计算任务模块（计算任务方案：阶段 1-4）
     include("services/task_manager.jl")
@@ -822,8 +824,11 @@ println("╚══════════════════════�
 println("Starting on port $PORT...")
 
 # 启动恢复：把上次运行中"中断"的 solving 任务改为 paused
-init_task_routes!()
-init_ingest_routes!()
+if get(ENV, "SYNERROLL_CAPACITY_WORKER", "0") != "1"
+    init_task_routes!()
+    init_ingest_routes!()
+    reconcile_planning_tasks!()
+end
 
 
 # ───── 启动预热：避免首次点开/建任务时 JIT 卡顿 ─────
@@ -860,6 +865,7 @@ function warmup_backend()
     return nothing
 end
 
-warmup_backend()
-
-serve(host="0.0.0.0", port=PORT, async=false, middleware=[CorsMiddleware])
+if get(ENV, "SYNERROLL_CAPACITY_WORKER", "0") != "1"
+    warmup_backend()
+    serve(host="0.0.0.0", port=PORT, async=false, middleware=[CorsMiddleware])
+end

@@ -39,7 +39,7 @@ export const componentUIConfigs: Record<string, ComponentUIConfig> = {
   },
   CP: {
     icon: 'factory',
-    iconSrc: deviceIcon('gas-plant'),
+    iconSrc: deviceIcon('coal-plant'),
     canvasType: 'energy',
     defaultSize: { width: 150, height: 150 },
     appearance: createAppearance('#FFF1F0', getDeviceColor('CP'))
@@ -109,7 +109,7 @@ export const componentUIConfigs: Record<string, ComponentUIConfig> = {
   },
   GP: {
     icon: 'factory',
-    iconSrc: deviceIcon('coal-plant'),
+    iconSrc: deviceIcon('gas-plant'),
     canvasType: 'energy',
     defaultSize: { width: 150, height: 150 },
     appearance: createAppearance('#FFF7ED', getDeviceColor('GP'))

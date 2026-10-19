@@ -245,11 +245,7 @@ function _read_exact_flexibility_baseline_value(
     data_key::String,
     timestamp::String,
 )
-    series = get_ts(db_path, data_key)
-    series === nothing && return nothing
-    index = findfirst(==(timestamp), series.timestamps)
-    index === nothing && return nothing
-    return series.values[index]
+    return get_ts_exact(db_path, data_key, timestamp)
 end
 
 function _select_flexibility_components(

@@ -3,6 +3,7 @@ import * as echarts from 'echarts'
 import type { FlexibilityDisplayWindow } from '~~/types/flexibility-display'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { timeLabelToMinutes } from '~~/utils/timeLabel'
+import { useVisibleChart } from '~~/composables/useVisibleChart'
 
 type RequirementSource = 'net_load_change' | 'agc_or_schedule' | 'user_defined'
 
@@ -17,6 +18,7 @@ interface RequirementPeriod {
 
 const props = defineProps<{
   rows: RequirementPeriod[]
+  resultRevision?: number
   source: RequirementSource
   displayWindow: FlexibilityDisplayWindow
   simStartTime?: string
@@ -32,6 +34,8 @@ const emit = defineEmits<{
 const chartRef = ref<HTMLDivElement | null>(null)
 const netLoadDisplayMode = ref<'level' | 'change'>('level')
 let chart: echarts.ECharts | null = null
+const { schedule: scheduleRender } = useVisibleChart(chartRef, () => render(),
+  () => chart, () => 'flexibility requirement', () => props.resultRevision ?? 0, 'flexibility')
 let resizeObserver: ResizeObserver | null = null
 
 const title = computed(() => {
@@ -286,11 +290,11 @@ function render(): void {
 watch(
   [() => props.rows, () => props.source, netLoadDisplayMode,
     () => displayWindow.value.start, () => displayWindow.value.end],
-  render
+  scheduleRender
 )
 
 onMounted(() => {
-  render()
+  scheduleRender()
   resizeObserver = new ResizeObserver(() => chart?.resize())
   resizeObserver.observe(chartRef.value!)
 })

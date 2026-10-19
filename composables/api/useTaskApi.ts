@@ -70,8 +70,13 @@ export const useTaskApi = () => {
       varName?: string
       sourceId?: string
       remark?: string
-      /** 只拉 ts 分钟数 >= minMinutes 的增量点 */
+      /** 按显示窗口读取；已运行任务的变化点应使用 afterId，包含对旧时刻的修正。 */
       minMinutes?: number
+      maxMinutes?: number
+      /** 上次返回的已提交 rowid；不要使用 max(ts) 作为增量水位。 */
+      afterId?: number
+      limit?: number
+      boundaryOnly?: boolean
       /** 增量时跳过边界序列 b_* */
       skipBoundary?: boolean
     }) => {
@@ -84,15 +89,20 @@ export const useTaskApi = () => {
         q.set('minMinutes', String(params.minMinutes))
       }
       if (params?.skipBoundary) q.set('skipBoundary', '1')
+      if (params?.boundaryOnly) q.set('boundaryOnly', '1')
+      for (const key of ['maxMinutes', 'afterId', 'limit'] as const) {
+        if (params?.[key] !== undefined) q.set(key, String(params[key]))
+      }
       const qs = q.toString()
       return apiClient.get<TaskDataResponse>(
         `/task/${taskId}/data${qs ? `?${qs}` : ''}`
       )
     },
 
-    getFlexibility: (taskId: string, layerId?: string, minMinutes?: number) => {
+    getFlexibility: (taskId: string, layerId?: string, minMinutes?: number, afterRevision?: number) => {
       const q = new URLSearchParams()
       if (layerId) q.set('layerId', layerId)
+      if (afterRevision !== undefined) q.set('afterRevision', String(afterRevision))
       if (typeof minMinutes === 'number' && minMinutes > 0) {
         q.set('minMinutes', String(minMinutes))
       }

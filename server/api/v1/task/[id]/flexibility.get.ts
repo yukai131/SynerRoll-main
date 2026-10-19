@@ -1,47 +1,24 @@
 import { apiSuccess } from '#server/utils/response'
-import { JULIA } from '#server/utils/julia'
+import { readTaskFlexibility, timeLabelToMinutes } from '#server/utils/sqlite-reader'
 
-const JULIA_BACKEND_URL_BASE = JULIA.task()
-
-/** 拉取任务的逐时段灵活性结果和全时域汇总。 */
-export default defineEventHandler(async (event) => {
+export default defineEventHandler((event) => {
   const id = getRouterParam(event, 'id')
-  if (!id) {
-    throw createError({ statusCode: 400, message: '缺少 task id' })
-  }
-
+  if (!id) throw createError({ statusCode: 400, message: '缺少 task id' })
   const query = getQuery(event)
-  const url = new URL(`${JULIA_BACKEND_URL_BASE}/${id}/flexibility`)
-  if (typeof query.layerId === 'string' && query.layerId) {
-    url.searchParams.set('layerId', query.layerId)
+  const afterRevision = query.afterRevision === undefined ? undefined : Number(query.afterRevision)
+  if (afterRevision !== undefined && (!Number.isSafeInteger(afterRevision) || afterRevision < 0)) {
+    throw createError({ statusCode: 400, message: 'afterRevision 无效' })
   }
-  if (typeof query.minTs === 'string' && query.minTs) {
-    url.searchParams.set('minTs', query.minTs)
+  const minMinutes = query.minMinutes === undefined
+    ? (typeof query.minTs === 'string' ? timeLabelToMinutes(query.minTs) ?? 0 : undefined)
+    : Number(query.minMinutes)
+  if (minMinutes !== undefined && (!Number.isFinite(minMinutes) || minMinutes < 0)) {
+    throw createError({ statusCode: 400, message: 'minMinutes 无效' })
   }
-  if (typeof query.minMinutes === 'string' && query.minMinutes) {
-    url.searchParams.set('minMinutes', query.minMinutes)
-  }
-
-  try {
-    const response = await $fetch<{
-      success: boolean
-      data?: Record<string, unknown>
-      message?: string
-    }>(url.toString(), { method: 'GET' })
-
-    if (response.success) {
-      return apiSuccess(response.data ?? {}, response.message)
-    }
-    throw createError({
-      statusCode: 400,
-      message: response.message || '拉灵活性结果失败'
-    })
-  }
-  catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
-    throw createError({
-      statusCode: 500,
-      message: `Julia backend error: ${message}`
-    })
-  }
+  const result = readTaskFlexibility(id, {
+    layerId: typeof query.layerId === 'string' ? query.layerId : undefined,
+    minMinutes, afterRevision,
+  })
+  if (!result) throw createError({ statusCode: 404, message: '任务不存在' })
+  return apiSuccess(result)
 })

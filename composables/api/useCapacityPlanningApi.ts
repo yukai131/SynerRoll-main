@@ -1,11 +1,15 @@
 import type {
+  CapacityVariableDraft,
   BoundaryDataset,
   BoundaryDatasetSummary,
   ApplyCapacityPlanningRequest,
   ApplyCapacityPlanningResult,
+  ApplyCapacityPlanningPreview,
   CapacityPlanningResult,
   CapacityPlanningTask,
   CapacityPlanningFormSchema,
+  CapacityPlanningComparison,
+  CapacityApplyRecord,
   CapacityEconomicsConfig,
   ClusteringConfig,
   ImportBoundaryDatasetRequest,
@@ -75,6 +79,10 @@ export const useCapacityPlanningApi = () => {
   const getPlanningResult = (planningId: string) =>
     apiClient.get<CapacityPlanningResult>(`/capacity-planning/${encodeURIComponent(planningId)}/result`)
 
+  // C-405 方案比较
+  const getPlanningComparison = (planningId: string) =>
+    apiClient.get<CapacityPlanningComparison>(`/capacity-planning/${encodeURIComponent(planningId)}/comparison`)
+
   const listPlannings = (projectId: string) =>
     apiClient.get<{ tasks: CapacityPlanningTask[] }>(
       `/capacity-planning?projectId=${encodeURIComponent(projectId)}`
@@ -102,6 +110,29 @@ export const useCapacityPlanningApi = () => {
       }
     )
 
+  const getApplyPreview = (planningId: string) =>
+    apiClient.get<ApplyCapacityPlanningPreview>(
+      `/capacity-planning/${encodeURIComponent(planningId)}/apply-preview`
+    )
+
+  // C-406 安全应用：应用记录与撤销/恢复
+  const listApplies = (planningId: string) =>
+    apiClient.get<{ applies: CapacityApplyRecord[] }>(
+      `/capacity-planning/${encodeURIComponent(planningId)}/applies`
+    )
+
+  const undoApply = (applyId: string) =>
+    apiClient.mutate<{ applyId: string; status: string; projectUpdatedAt: string }>(
+      `/capacity-planning/applies/${encodeURIComponent(applyId)}/undo`,
+      { method: 'POST' }
+    )
+
+  const redoApply = (applyId: string) =>
+    apiClient.mutate<{ applyId: string; status: string; projectUpdatedAt: string }>(
+      `/capacity-planning/applies/${encodeURIComponent(applyId)}/redo`,
+      { method: 'POST' }
+    )
+
   return {
     getFormSchema,
     validateVariables,
@@ -114,8 +145,13 @@ export const useCapacityPlanningApi = () => {
     cancelPlanning,
     getPlanning,
     getPlanningResult,
+    getPlanningComparison,
     listPlannings,
     updatePlanningConfig,
-    applyAndSimulate
+    applyAndSimulate,
+    getApplyPreview,
+    listApplies,
+    undoApply,
+    redoApply
   }
 }

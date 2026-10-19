@@ -137,6 +137,7 @@ mutable struct SQLiteTimeSeriesStore
     db::SQLite.DB
     write_lock::ReentrantLock
     db_path::String
+    flexibility_initialized::Bool
 end
 
 """
@@ -245,7 +246,7 @@ function SQLiteTimeSeriesStore(db_path::String)
     _safe_exec(db, "CREATE INDEX IF NOT EXISTS idx_trace_data ON solve_trace_data(trace_id)")
     _safe_exec(db, "CREATE INDEX IF NOT EXISTS idx_trace_meta_task ON solve_trace_meta(task_id, step)")
 
-    return SQLiteTimeSeriesStore(db, ReentrantLock(), db_path)
+    return SQLiteTimeSeriesStore(db, ReentrantLock(), db_path, false)
 end
 
 """
@@ -341,7 +342,8 @@ function _exec(db::SQLite.DB, sql::String, params=())
     return nothing
 end
 
-function get_ts(db_path::String, data_key::String)
+function get_ts(db_path::String, data_key::String;
+    min_minutes::Union{Nothing,Int}=nothing, max_minutes::Union{Nothing,Int}=nothing)
     store = get_store(db_path)
     source_id, var_name, remark, layer_id = _key_to_meta_params(data_key)
 
@@ -359,15 +361,22 @@ function get_ts(db_path::String, data_key::String)
         isempty(meta_rows[1]) && return nothing
         series_id = meta_rows[1][1]
 
-        data_rows = _query(store.db,
-            "SELECT ts, value FROM time_series_data WHERE series_id=?",
-            [series_id])
+        sql = "SELECT ts, value FROM time_series_data WHERE series_id=?"
+        params = Any[series_id]
+        if min_minutes !== nothing
+            sql *= " AND ts_min>=?"
+            push!(params, min_minutes)
+        end
+        if max_minutes !== nothing
+            sql *= " AND ts_min<?"
+            push!(params, max_minutes)
+        end
+        data_rows = _query(store.db, sql * " ORDER BY ts_min", params)
 
         isempty(data_rows[1]) && return TimeSeries()
         timestamps = Vector{String}(data_rows[1])
         values = Vector{Float64}(data_rows[2])
-        perm = sortperm(timestamps; lt=time_label_less_than)
-        return TimeSeries(timestamps[perm], values[perm])
+        return TimeSeries(timestamps, values)
     end
 end
 
@@ -420,7 +429,7 @@ function _write_ts(store::SQLiteTimeSeriesStore, data_key::String, ts::TimeSerie
         try; _exec(store.db, "ROLLBACK"); catch; end
         rethrow(e)
     end
-    snapshot_put!(store.db_path, data_key, ts)
+    snapshot_publish_if_loaded!(store.db_path, data_key, ts; overlay=false)
     # 刷新 series_id 缓存，避免新建 meta 后反复查
     try
         resolve_series_id(store.db_path, source_id, var_name, remark, layer_id)
@@ -497,7 +506,7 @@ function set_ts_merge(db_path::String, data_key::String, new_ts::TimeSeries)
             end
 
             _exec(store.db, "COMMIT")
-            snapshot_merge!(store.db_path, data_key, new_ts)
+            snapshot_publish_if_loaded!(store.db_path, data_key, new_ts)
             ts_probe_add!("merge_ms", (time() - tw) * 1000)
             ts_probe_add!("merge_count", 1.0)
         catch e
@@ -778,14 +787,14 @@ end
 # 结果内存快照（性能）：API 只读快照，避免与求解写库抢锁/全表扫
 # ═══════════════════════════════════════════════════════════════════════════
 
-const RESULT_SNAPSHOT = Dict{String,Dict{String,TimeSeries}}()
+const RESULT_SNAPSHOT = Dict{String,Dict{String,Dict{String,Float64}}}()
 const RESULT_SNAPSHOT_LOCK = ReentrantLock()
 
 """用整段 TimeSeries 覆盖快照中的一条序列"""
 function snapshot_put!(db_path::String, data_key::String, ts::TimeSeries)
     lock(RESULT_SNAPSHOT_LOCK) do
-        series_map = get!(RESULT_SNAPSHOT, db_path, Dict{String,TimeSeries}())
-        series_map[data_key] = ts
+        series_map = get!(RESULT_SNAPSHOT, db_path, Dict{String,Dict{String,Float64}}())
+        series_map[data_key] = Dict(zip(ts.timestamps, ts.values))
     end
     return nothing
 end
@@ -794,9 +803,20 @@ end
 function snapshot_merge!(db_path::String, data_key::String, new_ts::TimeSeries)
     isempty(new_ts.timestamps) && return nothing
     lock(RESULT_SNAPSHOT_LOCK) do
-        series_map = get!(RESULT_SNAPSHOT, db_path, Dict{String,TimeSeries}())
-        old = get(series_map, data_key, nothing)
-        series_map[data_key] = old === nothing ? new_ts : merge_timeseries(old, new_ts)
+        series_map = get!(RESULT_SNAPSHOT, db_path, Dict{String,Dict{String,Float64}}())
+        points = get!(series_map, data_key, Dict{String,Float64}())
+        for (timestamp, value) in zip(new_ts.timestamps, new_ts.values)
+            points[timestamp] = value
+        end
+    end
+    return nothing
+end
+
+"""BFF 直读库时不维护重复快照；仅给已使用 Julia /data 的订阅者发布已提交数据。"""
+function snapshot_publish_if_loaded!(db_path::String, data_key::String, ts::TimeSeries; overlay::Bool=true)
+    lock(RESULT_SNAPSHOT_LOCK) do
+        haskey(RESULT_SNAPSHOT, db_path) || return nothing
+        overlay ? snapshot_merge!(db_path, data_key, ts) : snapshot_put!(db_path, data_key, ts)
     end
     return nothing
 end
@@ -840,11 +860,7 @@ function snapshot_rows(db_path::String; min_minutes::Integer=0, skip_boundary::B
                 slot[ts] = val
             end
             lock(RESULT_SNAPSHOT_LOCK) do
-                series_map = get!(RESULT_SNAPSHOT, db_path, Dict{String,TimeSeries}())
-                for (key, slot) in tmp
-                    tss = sort(collect(keys(slot)); lt=time_label_less_than)
-                    series_map[key] = TimeSeries(tss, [slot[t] for t in tss])
-                end
+                RESULT_SNAPSHOT[db_path] = tmp
             end
         end
         loaded = true
@@ -860,16 +876,15 @@ function snapshot_rows(db_path::String; min_minutes::Integer=0, skip_boundary::B
     max_ts_label = ""
     raw_points = 0
     snapshot = lock(RESULT_SNAPSHOT_LOCK) do
-        copy(RESULT_SNAPSHOT[db_path])
+        Dict(key => copy(points) for (key, points) in RESULT_SNAPSHOT[db_path])
     end
-    for (data_key, ts) in snapshot
+    for (data_key, points) in snapshot
         source_id, var_name, remark, layer_id = _key_to_meta_params(data_key)
         if skip_boundary && startswith(source_id, "b_")
             continue
         end
-        for i in 1:length(ts.timestamps)
+        for tlabel in sort!(collect(keys(points)); lt=time_label_less_than)
             raw_points += 1
-            tlabel = ts.timestamps[i]
             m = 0
             try
                 m = time_label_to_minutes(tlabel)
@@ -887,9 +902,10 @@ function snapshot_rows(db_path::String; min_minutes::Integer=0, skip_boundary::B
             push!(all_rows, Dict(
                 "sourceId" => source_id,
                 "varName" => var_name,
+                "remark" => remark,
                 "layerId" => layer_id,
                 "ts" => tlabel,
-                "value" => ts.values[i],
+                "value" => points[tlabel],
             ))
         end
     end
@@ -989,8 +1005,8 @@ function get_ts_floor(db_path::String, data_key::String, ts::String)::Union{Floa
     store = get_store(db_path)
     lock(store.write_lock) do
         rows = _query(store.db,
-            "SELECT value FROM time_series_data WHERE series_id=? AND COALESCE(ts_min, $(TS_MIN_EXPR)) <= ?
-             ORDER BY COALESCE(ts_min, $(TS_MIN_EXPR)) DESC LIMIT 1",
+            "SELECT value FROM time_series_data WHERE series_id=? AND ts_min <= ?
+             ORDER BY ts_min DESC LIMIT 1",
             [sid, target])
         isempty(rows[1]) && return nothing
         return Float64(rows[1][1])
@@ -1010,8 +1026,8 @@ function get_ts_floor_pair(db_path::String, data_key::String, ts::String)::Union
     store = get_store(db_path)
     lock(store.write_lock) do
         rows = _query(store.db,
-            "SELECT ts, value FROM time_series_data WHERE series_id=? AND COALESCE(ts_min, $(TS_MIN_EXPR)) <= ?
-             ORDER BY COALESCE(ts_min, $(TS_MIN_EXPR)) DESC LIMIT 1",
+            "SELECT ts, value FROM time_series_data WHERE series_id=? AND ts_min <= ?
+             ORDER BY ts_min DESC LIMIT 1",
             [sid, target])
         isempty(rows[1]) && return nothing
         return (String(rows[1][1]), Float64(rows[1][2]))
@@ -1031,8 +1047,8 @@ function get_ts_values_at(db_path::String, data_key::String, times::Vector{Strin
     out = Vector{Float64}(undef, length(times))
     lock(store.write_lock) do
         stmt = DBInterface.prepare(store.db,
-            "SELECT value FROM time_series_data WHERE series_id=? AND COALESCE(ts_min, $(TS_MIN_EXPR)) <= ?
-             ORDER BY COALESCE(ts_min, $(TS_MIN_EXPR)) DESC LIMIT 1")
+            "SELECT value FROM time_series_data WHERE series_id=? AND ts_min <= ?
+             ORDER BY ts_min DESC LIMIT 1")
         try
             for (i, t) in enumerate(times)
                 target = time_label_to_minutes(t)
@@ -1072,7 +1088,7 @@ end
 
 """按条件找唯一 data_key；无匹配或不唯一返回 nothing"""
 function _query_unique_data_key(db_path::String;
-    source_id=nothing, var_name=nothing, remark=nothing, layer_id=nothing)
+    source_id=nothing, var_name=nothing, remark=nothing, layer_id=nothing, strict::Bool=false)
 
     store = get_store(db_path)
     return lock(store.write_lock) do
@@ -1097,6 +1113,7 @@ function _query_unique_data_key(db_path::String;
         rows = _query(store.db, sql, params)
         isempty(rows[1]) && return nothing
         if length(rows[1]) > 1
+            strict && return nothing
             # 多条时优先 remark=planned（上层计划曲线）
             for i in 1:length(rows[1])
                 if String(rows[4][i]) == "planned"
@@ -1196,11 +1213,6 @@ function write_timeseries_batch!(
                             [series_id, ts.timestamps[i], ts.values[i], time_label_to_minutes(ts.timestamps[i])])
                     end
 
-                    if overlay
-                        snapshot_merge!(store.db_path, data_key, ts)
-                    else
-                        snapshot_put!(store.db_path, data_key, ts)
-                    end
                 end
             finally
                 DBInterface.close!(insert_stmt)
@@ -1209,6 +1221,15 @@ function write_timeseries_batch!(
         catch e
             try; _exec(store.db, "ROLLBACK"); catch; end
             rethrow(e)
+        end
+        # 发布发生在 COMMIT 之后；回滚不会污染缓存，且不在事务内重建历史序列。
+        for (data_key, ts) in pairs
+            snapshot_publish_if_loaded!(store.db_path, data_key, ts; overlay)
+        end
+        if isdefined(@__MODULE__, :PERF_ENABLED) && PERF_ENABLED
+            cursor = Int(_query(store.db, "SELECT COALESCE(MAX(id), 0) FROM time_series_data")[1][1])
+            perf_record("task", basename(dirname(db_path)), "result_committed", 0.0, 0, 0, 0, "ok",
+                Dict("result_cursor" => cursor, "committed_at_ms" => round(Int, time() * 1000)))
         end
         ts_probe_add!("batch_ms", (time() - tw) * 1000)
         ts_probe_add!("batch_count", 1.0)

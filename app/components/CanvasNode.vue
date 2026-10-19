@@ -230,12 +230,13 @@ const wrapperStyle = computed(() => {
       >
         <span
           :class="fullIconMode ? 'h-full w-full' : 'h-1/2 w-1/2'"
-          class="inline-flex items-center justify-center rounded-xl bg-white/90 text-app-text shadow-sm"
+          class="inline-flex items-center justify-center overflow-hidden rounded-xl bg-white/90 text-app-text shadow-sm"
         >
           <AppIcon
             :name="definition.icon"
             :src="definition.iconSrc"
             :size="fullIconMode ? 72 : 36"
+            :style="{ width: '100%', height: '100%' }"
             :fallback-text="definition.label.slice(0, 1)"
           />
         </span>

@@ -1,16 +1,19 @@
+import { juliaUrl } from '#server/utils/julia'
 import type {
   CapacityPlanningTask,
   CreateCapacityPlanningRequest
 } from '~~/types/capacity-planning'
-import { JULIA } from '#server/utils/julia'
 
 import { apiSuccess } from '#server/utils/response'
 import { readProjectById } from '#server/utils/project-store'
 
-const JULIA_BACKEND_URL = JULIA.capacityPlanning()
+const JULIA_BACKEND_URL = juliaUrl('/api/capacity-planning')
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<CreateCapacityPlanningRequest>(event)
+  if (!body.projectId?.trim() || !body.canvasId?.trim()) {
+    throw createError({ statusCode: 400, message: 'projectId 和 canvasId 不能为空' })
+  }
   const project = await readProjectById(body.projectId)
 
   try {
@@ -25,7 +28,7 @@ export default defineEventHandler(async (event) => {
       }
     )
     if (!response.success || !response.data) {
-      throw createError({ statusCode: 400, statusMessage: response.message || '创建容量规划任务失败' })
+      throw createError({ statusCode: 400, message: response.message || '创建容量规划任务失败' })
     }
     return apiSuccess(response.data)
   }
@@ -33,7 +36,7 @@ export default defineEventHandler(async (event) => {
     if (error && typeof error === 'object' && 'statusCode' in error) throw error
     throw createError({
       statusCode: 502,
-      statusMessage: `Julia 后端不可用: ${error instanceof Error ? error.message : String(error)}`
+      message: `Julia 后端不可用: ${error instanceof Error ? error.message : String(error)}`
     })
   }
 })

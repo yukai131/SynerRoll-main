@@ -119,6 +119,10 @@ export interface TaskDataRow {
 export interface TaskDataResponse {
   label: string
   rows: TaskDataRow[]
+  cursor?: number
+  latestCursor?: number
+  hasMore?: boolean
+  probe?: Record<string, number | string | boolean>
 }
 
 export interface TaskTraceStep {
@@ -216,6 +220,11 @@ export interface EconomyEvaluationResult {
 // ───── 灵活性评估 ─────
 export interface FlexibilityPeriodResult {
   timestamp: string
+  next_timestamp: string
+  time_step: string
+  requirement: number
+  reference_power?: number | null
+  target_power?: number | null
   timestamp_minutes?: number
   direction: 'up' | 'down'
   requirement_source?: string
@@ -249,5 +258,8 @@ export interface TaskFlexibilityResponse {
   config?: FlexibilityTaskConfig | { enabled: boolean }
   periods: FlexibilityPeriodResult[]
   summaries: FlexibilitySummaryResult[]
+  revision?: number
+  versioned?: boolean
+  reset?: boolean
   probe?: Record<string, number | string | boolean>
 }

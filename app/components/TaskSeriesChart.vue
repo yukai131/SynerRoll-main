@@ -6,6 +6,9 @@ import {
 } from '~~/utils/timeLabel'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { getDeviceColor, getLayerColor } from '~~/config/device-colors'
+import { pointMinutes, sliceTimeSeries } from '~~/utils/time-series-window'
+import { downsampleTimeSeries } from '~~/utils/chart-downsample'
+import { useVisibleChart } from '~~/composables/useVisibleChart'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
 
@@ -20,6 +23,7 @@ const props = defineProps<{
   deviceColorKey?: string
   /** 父级数据版本号，嵌套 layers 引用不变时也强制重绘 */
   dataVersion?: number
+  resultCursor?: number
   unit: string
   /** 层ID→层名称映射，如 { "1": "日前", "2": "日内" } */
   layerNames?: Record<string, string>
@@ -36,6 +40,8 @@ const emit = defineEmits<{
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
+const { schedule: scheduleRender } = useVisibleChart(chartRef, () => render(),
+  () => chartInstance, () => props.title, () => props.resultCursor ?? 0)
 const DAY_MINUTES = 24 * 60
 
 const dateRangeStartMinutes = computed(() => props.displayWindow.dateStart)
@@ -46,27 +52,20 @@ const rangeEndMinutes = computed(() => props.displayWindow.end)
 const simStartMinutes = computed(() => timeLabelToMinutes(props.simStartTime ?? '0:00'))
 const simEndMinutes = computed(() => props.simEndTime ? timeLabelToMinutes(props.simEndTime) : null)
 
-const timelineMinutes = computed(() => [...new Set(
-  Object.values(props.layers)
-    .flat()
-    .map(point => timeLabelToMinutes(point.ts))
-    .filter(Number.isFinite)
-)].sort((left, right) => left - right))
-
 const sliderStepMinutes = computed(() => {
-  const timeline = timelineMinutes.value
-  const steps = timeline
-    .slice(1)
-    .map((minute, index) => minute - timeline[index]!)
-    .filter(step => step > 0)
-  return Math.min(...steps, 60)
+  let step = 60
+  for (const points of Object.values(props.layers)) {
+    if (points.length > 1) {
+      const difference = pointMinutes(points[1]!) - pointMinutes(points[0]!)
+      if (difference > 0) step = Math.min(step, difference)
+    }
+  }
+  return step
 })
 
 const sliderMax = computed(() => {
-  const timeline = timelineMinutes.value
-  const dataEnd = timeline.length
-    ? timeline[timeline.length - 1]! + sliderStepMinutes.value
-    : DAY_MINUTES
+  const ends = Object.values(props.layers).filter(points => points.length).map(points => pointMinutes(points[points.length - 1]!))
+  const dataEnd = ends.length ? Math.max(...ends) + sliderStepMinutes.value : DAY_MINUTES
   // 跟随本图已有数据末端，而不是被 simEnd 锁死在全年；
   // 否则仿真头往前走时，曲线只在左侧加长，看起来像卡住不滚动
   return Math.max(simStartMinutes.value + sliderStepMinutes.value, dataEnd)
@@ -118,42 +117,6 @@ function layerColor(index: number, total: number): string {
 }
 
 
-/**
- * 显示用抽稀：仅缩点给 ECharts，不修改原始数据。
- * 视窗 <= 48h 或点数不多时返回全精度（缩放后仍精细）。
- */
-function downsampleForDisplay(
-  data: Array<[number, number]>,
-  startMin: number,
-  endMin: number,
-  maxPoints = 1200
-): Array<[number, number]> {
-  const span = Math.max(1, endMin - startMin)
-  if (span <= 48 * 60 || data.length <= maxPoints) return data
-  const bucketCount = Math.max(2, Math.floor(maxPoints / 4))
-  const bucketSize = span / bucketCount
-  const out: Array<[number, number]> = []
-  let i = 0
-  while (i < data.length && out.length < maxPoints) {
-    let j = i
-    let minP = data[i]!
-    let maxP = data[i]!
-    const bucketEnd = data[i]![0] + bucketSize
-    while (j < data.length && data[j]![0] < bucketEnd) {
-      const p = data[j]!
-      if (p[1] < minP[1]) minP = p
-      if (p[1] > maxP[1]) maxP = p
-      j++
-    }
-    const last = data[j - 1]!
-    for (const p of [data[i]!, minP, maxP, last]) {
-      if (!out.length || out[out.length - 1]![0] !== p[0]) out.push(p)
-    }
-    i = j
-  }
-  return out
-}
-
 const render = () => {
   if (!chartRef.value) return
   if (!chartInstance) {
@@ -166,11 +129,10 @@ const render = () => {
 
   const series: echarts.SeriesOption[] = layerIds.map((lid, i) => {
     const points = props.layers[lid] ?? []
-    const filtered = points
-      .filter(p => { const m = timeLabelToMinutes(p.ts); return m >= startMin && m < endMin })
-      .map(p => [timeLabelToMinutes(p.ts), truncateSeriesValue(p.value)] as [number, number])
+    const filtered = sliceTimeSeries(points, startMin, endMin)
+      .map(p => [pointMinutes(p), truncateSeriesValue(p.value)] as [number, number])
     // 大视窗才抽稀；缩小视窗后自动回到全精度点
-    const data: [number, number][] = downsampleForDisplay(filtered, startMin, endMin)
+    const data: [number, number][] = downsampleTimeSeries(filtered, startMin, endMin)
     const color = layerColor(i, layerIds.length)
     return {
       id: `layer-${lid}`,
@@ -247,7 +209,7 @@ const render = () => {
         return html
       }
     },
-    animation: true,
+    animation: false,
     animationDuration: 300,
     animationDurationUpdate: 220,
     animationEasing: 'cubicOut',
@@ -267,10 +229,10 @@ watch([
   () => props.unit,
   () => props.simStartDate,
   () => props.displayWindow
-], () => render())
+], scheduleRender)
 
 onMounted(() => {
-  render()
+  scheduleRender()
   const ro = new ResizeObserver(() => chartInstance?.resize())
   if (chartRef.value) ro.observe(chartRef.value)
   onBeforeUnmount(() => ro.disconnect())

@@ -394,16 +394,18 @@ function _evaluate_flexibility_after_solve!(
             case_id=task_id,
             config=config,
         )
-        persist_system_flexibility_period_results!(
-            store_path,
-            config.layer_id,
-            evaluation.margin_results,
-        )
+        revision = perf_measure("task", task_id, "flexibility_write") do
+            persist_system_flexibility_period_results!(
+                store_path, config.layer_id, evaluation.margin_results,
+            )
+        end
         rows = system_flexibility_margin_result_dict.(evaluation.margin_results)
         broadcast_event(ctx, Dict(
             "type" => "flexibility",
             "taskId" => task_id,
             "layerId" => config.layer_id,
+            "revision" => revision,
+            "committedAtMs" => round(Int, time() * 1000),
             "startTimestamp" => first(timestamps),
             "endTimestamp" => time_label_add(last(timestamps), string(layer["step"])),
             "rows" => rows,

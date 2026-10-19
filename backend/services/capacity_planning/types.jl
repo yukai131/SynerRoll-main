@@ -11,6 +11,7 @@ Base.@kwdef struct EvaluationOptions
     persist_timeseries::Bool = true
     generate_code::Bool = true
     stop_on_infeasible::Bool = true
+    scenario_time_limit_seconds::Float64 = 60.0
 end
 
 Base.@kwdef struct EvaluationResult
@@ -29,11 +30,21 @@ Base.@kwdef struct EconomicEvaluationInput
     units::Dict{String,String}
     simulation::EvaluationResult
     config::Dict{String,Any}
+    # 后验运行成本评价（timeseries-operating-cost-v1）所需：
+    # 候选工作目录（内含 scenarios/<id>/timeseries.db）与候选快照
+    layer_id::String = "1"
+    work_dir::Union{Nothing,String} = nothing
+    project_snapshot::Union{Nothing,AbstractDict} = nothing
+    # C-401 第二增量：组件容量变更方式（componentId => new/replace/retire），
+    # 生命周期经济按变更方式计算处置回收与新增投资
+    change_kinds::Dict{String,String} = Dict{String,String}()
+    # C-401 第二增量：变更前原始容量（componentId => kW），退役/替换的处置回收依赖
+    original_capacities::Dict{String,Float64} = Dict{String,Float64}()
 end
 
 Base.@kwdef struct EconomicEvaluationResult
     fitness::Float64
-    breakdown::Dict{String,Float64}
+    breakdown::Dict{String,Any}
     indicators::Dict{String,Union{Float64,Nothing}}
     warnings::Vector{String}
     evaluator_version::String

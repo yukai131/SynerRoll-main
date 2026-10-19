@@ -7,6 +7,8 @@
  */
 
 export type TaskWsEvent =
+  | { type: 'flexibility'; taskId: string; layerId: string; rows: Array<Record<string, unknown>>; revision?: number; committedAtMs?: number }
+  | { type: 'flexibility_summary'; taskId: string }
   | { type: 'status'; taskId: string; status: string; currentTime?: string | null }
   | { type: 'data'; taskId: string; currentTime: string; layerId?: string; rows: Array<Record<string, unknown>> }
   | { type: 'ts_rows'; taskId: string; rows: Array<Record<string, unknown>> }

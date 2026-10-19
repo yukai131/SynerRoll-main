@@ -38,10 +38,20 @@ end
 # ─── 辅助：项目解析 ──────────────────────────────────────────────────────────
 
 function _safe_get_ts_values(db_path::String, data_key::String, sim_start::String, sim_end::Union{String,Nothing})::Vector{Float64}
-    ts = get_ts(db_path, data_key)
+    ts = get_ts(db_path, data_key;
+        min_minutes=time_label_to_minutes(sim_start),
+        max_minutes=sim_end === nothing ? nothing : time_label_to_minutes(sim_end))
     ts === nothing && return Float64[]
-    filtered = truncate_timeseries(ts, sim_start, sim_end)
-    return filtered.values
+    return ts.values
+end
+
+function _economy_boundary_window(db_path::String, source_id::String, sim_start::String, sim_end::Union{String,Nothing})
+    key = _query_unique_data_key(db_path; source_id, remark="planned", strict=true)
+    key === nothing && return nothing, nothing
+    series = get_ts(db_path, key;
+        min_minutes=time_label_to_minutes(sim_start),
+        max_minutes=sim_end === nothing ? nothing : time_label_to_minutes(sim_end))
+    return series, key
 end
 
 function _get_layers(project_json::Dict)
@@ -216,7 +226,7 @@ function load_boundary_price_series(
         bid_s = string(bid)
         ts_label = nothing
         try
-            pair = query_ts(store_path; source_id=bid_s, remark="planned")
+            pair = _economy_boundary_window(store_path, bid_s, sim_start, sim_end)
             ts = pair isa Tuple ? pair[1] : pair
             label = pair isa Tuple ? pair[2] : ""
             ts === nothing && continue
@@ -257,7 +267,7 @@ function load_boundary_price_series_multi(
         slot > n && break
         bid_s = string(bid)
         try
-            pair = query_ts(store_path; source_id=bid_s, remark="planned")
+            pair = _economy_boundary_window(store_path, bid_s, sim_start, sim_end)
             ts = pair isa Tuple ? pair[1] : pair
             label = pair isa Tuple ? pair[2] : ""
             ts === nothing && continue
@@ -299,8 +309,13 @@ function load_slack_data(store_path::String, layer_id::String, penalty_rate::Flo
             series_id = rows[1][i]
             var_name_str = String(rows[3][i])
 
-            data_rows = _query(store.db,
-                "SELECT ts, value FROM time_series_data WHERE series_id=?", [series_id])
+            sql = "SELECT ts, value FROM time_series_data WHERE series_id=? AND ts_min>=?"
+            params = Any[series_id, start_min]
+            if end_min !== nothing
+                sql *= " AND ts_min<?"
+                push!(params, end_min)
+            end
+            data_rows = _query(store.db, sql, params)
             isempty(data_rows[1]) && continue
 
             values = Float64[]

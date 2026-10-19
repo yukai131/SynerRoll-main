@@ -22,11 +22,17 @@ function _read_persisted_baseline_value(
     data_key::String,
     timestamp::String,
 )
-    series = get_ts(db_path, data_key)
-    if series === nothing || isempty(series.timestamps)
-        return nothing
+    value = get_ts_floor(db_path, data_key, timestamp)
+    value !== nothing && return value
+    source_id, var_name, remark, layer_id = _key_to_meta_params(data_key)
+    sid = resolve_series_id(db_path, source_id, var_name, remark, layer_id)
+    sid === nothing && return nothing
+    store = get_store(db_path)
+    has_points = lock(store.write_lock) do
+        !isempty(_query(store.db, "SELECT 1 FROM time_series_data WHERE series_id=? LIMIT 1", [sid])[1])
     end
-    return get_value(series, timestamp)
+    has_points && error("Time $(timestamp) does not exist in the series and no earlier fallback is available.")
+    return nothing
 end
 
 """

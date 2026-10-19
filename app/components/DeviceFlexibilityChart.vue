@@ -6,12 +6,14 @@ import {
   timeLabelToMinutes
 } from '~~/utils/timeLabel'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
+import { useVisibleChart } from '~~/composables/useVisibleChart'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
 const DASHED_LINE_LEGEND_ICON = 'path://M0 4H7V6H0Z M11 4H18V6H11Z M23 4H30V6H23Z'
 
 const props = defineProps<{
   title: string
+  resultRevision?: number
   deviceType: string
   rows: DeviceFlexibilityResult[]
   boundary?: boolean
@@ -27,6 +29,8 @@ const emit = defineEmits<{
 
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
+const { visible: chartVisible, schedule: scheduleRender } = useVisibleChart(chartRef, () => render(),
+  () => chart, () => props.title, () => props.resultRevision ?? 0, 'flexibility')
 let resizeObserver: ResizeObserver | null = null
 const DAY_MINUTES = 24 * 60
 const dateRangeStartMinutes = computed(() => props.displayWindow.dateStart)
@@ -48,13 +52,11 @@ function timeStepToMinutes(value: unknown): number {
 }
 
 const sliderStepMinutes = computed(() => {
-  const steps = props.rows
-    .map(row => timeStepToMinutes(row.time_step))
-    .filter(step => Number.isFinite(step) && step > 0)
-  return Math.min(...steps, 60)
+  return Math.min(timeStepToMinutes(props.rows[0]?.time_step), 60)
 })
 
 const sliderMax = computed(() => {
+  if (simEndMinutes.value !== null) return Math.max(simStartMinutes.value + sliderStepMinutes.value, simEndMinutes.value)
   let dataEnd = 0
   for (const row of props.rows) {
     const start = timeLabelToMinutes(row.timestamp)
@@ -120,7 +122,7 @@ const valueByDirection = (direction: 'up' | 'down', field: 'device_flexibility' 
   return timeline.value.map(timestamp => values.get(timestamp) ?? null)
 }
 
-const peak = (direction: 'up' | 'down'): number => Math.max(
+const peak = (direction: 'up' | 'down'): number => !chartVisible.value ? 0 : Math.max(
   0,
   ...visibleRows.value
     .filter(row => row.direction === direction)
@@ -179,7 +181,7 @@ const render = () => {
   }
 
   chart.setOption({
-    animation: true,
+    animation: false,
     animationDuration: 300,
     color: ['#165DFF', '#12B76A', '#F79009', '#F04438'],
     legend: {
@@ -230,10 +232,10 @@ watch([
   () => props.rows,
   () => props.simStartDate,
   () => props.displayWindow
-], render)
+], scheduleRender)
 
 onMounted(() => {
-  render()
+  scheduleRender()
   resizeObserver = new ResizeObserver(() => chart?.resize())
   resizeObserver.observe(chartRef.value!)
 })

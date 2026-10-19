@@ -4,14 +4,17 @@ end
 
 function resolve_prediction_series(ctx::BuildContext; source_id::String, algorithm_key::String)
     timestamps = generate_timestamps(ctx.time, ctx.layer["step"], ctx.layer["length"])
-    planned_ts, planned_label = query_ts(ctx.db_path; source_id=source_id, remark="planned")
-    planned_data = get_values(planned_ts, timestamps)
+    planned_label = _query_unique_data_key(ctx.db_path; source_id=source_id, remark="planned", strict=true)
+    planned_label === nothing && error("Planned boundary series not found: $(source_id)")
+    planned_data = get_ts_values_at(ctx.db_path, planned_label, timestamps)
 
     algorithm_name = get(ctx.algorithms, algorithm_key, "None")
     if ctx.layer["id"] == "1" || algorithm_name == "None"
         return planned_data, planned_label
     end
 
+    # 预测算法可能需要完整训练历史；仅显式启用预测时才读取。
+    planned_ts = get_ts(ctx.db_path, planned_label)
     predict_ts, _ = query_ts(ctx.db_path; source_id=source_id, remark="predict")
     actual_ts, _ = query_ts(ctx.db_path; source_id=source_id, remark="actual")
     return predict(predict_ts, actual_ts, planned_ts, Val(Symbol(algorithm_name))), planned_label

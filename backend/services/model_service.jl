@@ -673,13 +673,13 @@ function _persist_slack_results!(db_path::String, model, layer::Dict{String,Any}
 end
 
 function solve_model(model, component_dicts::Vector, layer::Dict{String,Any}, time::String, db_path::String;
-    overlay_mode::Bool=false)
+    overlay_mode::Bool=false, allow_time_limit_solution::Bool=false)
     components = [instantiate_component(component_dict) for component_dict in component_dicts]
-    return solve_model(model, components, layer, time, db_path; overlay_mode)
+    return solve_model(model, components, layer, time, db_path; overlay_mode, allow_time_limit_solution)
 end
 
 function solve_model(model, components::Vector{<:AbstractComponent}, layer::Dict{String,Any}, time::String, db_path::String;
-    overlay_mode::Bool=false)
+    overlay_mode::Bool=false, allow_time_limit_solution::Bool=false)
     optimizer_meta = PERF_ENABLED ? Dict{String,Any}(
         "layer_id" => layer["id"], "sim_time" => time,
         "variables" => JuMP.num_variables(model),
@@ -689,7 +689,10 @@ function solve_model(model, components::Vector{<:AbstractComponent}, layer::Dict
         JuMP.optimize!(model)
     end
 
-    if JuMP.termination_status(model) != MOI.OPTIMAL
+    time_limited_feasible = allow_time_limit_solution &&
+        JuMP.termination_status(model) == MOI.TIME_LIMIT && JuMP.has_values(model) &&
+        JuMP.primal_status(model) == MOI.FEASIBLE_POINT
+    if JuMP.termination_status(model) != MOI.OPTIMAL && !time_limited_feasible
         status = JuMP.termination_status(model)
         primal = JuMP.primal_status(model)
         dual = JuMP.dual_status(model)

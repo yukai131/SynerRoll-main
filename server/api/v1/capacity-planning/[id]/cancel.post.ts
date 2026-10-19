@@ -10,7 +10,7 @@ export default defineEventHandler(async (event) => {
   const response = await $fetch<{ success: boolean; data?: CapacityPlanningTask; message?: string }>(
     `${JULIA_BACKEND_URL}/${encodeURIComponent(id)}/cancel`,
     { method: 'POST', body: {} }
-  ).catch(error => ({ success: false, message: error instanceof Error ? error.message : String(error) }))
+  ).catch(error => ({ success: false, data: undefined, message: error instanceof Error ? error.message : String(error) }))
   if (!response.success || !response.data) {
     throw createError({ statusCode: 400, statusMessage: response.message || '取消容量规划任务失败' })
   }

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { sliceTimeSeries, pointMinutes } from '~~/utils/time-series-window'
+import { useVisibleChart } from '~~/composables/useVisibleChart'
 import * as echarts from 'echarts'
 import type { ChartDisplayWindow } from '~~/utils/display-window'
 import {
@@ -26,6 +28,7 @@ const props = withDefaults(
     liveData: Record<string, Record<string, Point[]>>
     /** 当前选中的时层 ID */
     layerId: string
+    resultCursor?: number
     /** 节点 code → 设备名称映射，如 { "7e8a": "风机1" } */
     codeToLabel: Record<string, string>
     /** 图表显示模式 */
@@ -201,10 +204,7 @@ function calcContribution(vars: string[]): ContributionItem[] {
   const deviceMap = new Map<string, { name: string; value: number; color: string }>()
   for (const varName of vars) {
     const code = extractCode(varName)
-    const data = getVarData(varName).filter(p => {
-      const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
-    })
+    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
     const stepHours = props.timeStepMinutes / 60
     const totalEnergy = data.reduce((sum, p) => sum + Math.abs(p.value) * stepHours, 0)
     const current = deviceMap.get(code)
@@ -471,6 +471,10 @@ const CHART_GRID_BOTTOM = 30
 const containerRef = ref<HTMLDivElement | null>(null)
 const chartRef = ref<HTMLDivElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
+const { schedule: scheduleRender } = useVisibleChart(chartRef, () => {
+  renderChart()
+  renderDetailCharts()
+}, () => chartInstance, () => props.busLabel, () => props.resultCursor ?? 0)
 let resizeObserver: ResizeObserver | null = null
 
 const renderChart = () => {
@@ -485,11 +489,8 @@ const renderChart = () => {
   // 收集所有时间戳
   const allTsSet = new Set<number>()
   for (const varName of props.variables) {
-    const data = getVarData(varName).filter(p => {
-      const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
-    })
-    data.forEach(p => allTsSet.add(timeLabelToMinutes(p.ts)))
+    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
+    data.forEach(p => allTsSet.add(pointMinutes(p)))
   }
   let allTs = Array.from(allTsSet).sort((a, b) => a - b)
   // 大视窗抽稀时间轴，避免万级柱子；小窗保持全精度
@@ -507,10 +508,7 @@ const renderChart = () => {
   // 源和荷共用一个 stack，正数自然向上、负数自然向下，保证同时刻对齐
 
   for (const varName of sourceVars.value) {
-    const data = getVarData(varName).filter(p => {
-      const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
-    })
+    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), p.value]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
 
@@ -525,10 +523,7 @@ const renderChart = () => {
   }
 
   for (const varName of displayedSinkVars.value) {
-    const data = getVarData(varName).filter(p => {
-      const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
-    })
+    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), -Math.abs(p.value)]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
 
@@ -545,10 +540,7 @@ const renderChart = () => {
   if (props.displayMode === 'loadTracking' && electricLoadVars.value.length > 0) {
     const totalLoadByTime = new Map<number, number>()
     for (const varName of electricLoadVars.value) {
-      const data = getVarData(varName).filter(p => {
-        const m = timeLabelToMinutes(p.ts)
-        return m >= startMin && m < endMin
-      })
+      const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
       for (const point of data) {
         const minute = timeLabelToMinutes(point.ts)
         totalLoadByTime.set(minute, (totalLoadByTime.get(minute) ?? 0) + Math.abs(point.value))
@@ -651,19 +643,11 @@ watch(
     () => props.simStartDate,
     () => props.displayWindow,
   ],
-  () => {
-    const t0 = performance.now()
-    renderChart()
-    renderDetailCharts()
-    const ms = performance.now() - t0
-    if (ms > 50) {
-      console.info(`[Probe] EnergyFlowChart render ${ms.toFixed(0)}ms`)
-    }
-  }
+  scheduleRender
 )
 
 onMounted(() => {
-  renderChart()
+  scheduleRender()
   resizeObserver = new ResizeObserver(() => {
     chartInstance?.resize()
     sourceDonutChart?.resize()

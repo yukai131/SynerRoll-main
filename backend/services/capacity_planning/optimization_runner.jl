@@ -21,15 +21,100 @@ function _quantize_candidate(values, variables)
     for (value, variable) in zip(values, optimize_variables)
         lower = Float64(variable["lowerBound"])
         upper = Float64(variable["upperBound"])
-        step = Float64(get(variable, "step", 0.0))
         number = Float64(value)
         isfinite(number) || throw(CapacityPlanningError("NON_FINITE_CANDIDATE", "优化器返回非有限容量"))
-        if step > 0
-            number = lower + round((number - lower) / step) * step
+        kind = string(get(variable, "valueKind", "continuous"))
+        if kind == "integer"
+            # C-401：整数台数量化（吸附到界内整数网格，避免下界带小数时候选出现小数）
+            lo = ceil(lower)
+            hi = floor(upper)
+            lo <= hi || throw(CapacityPlanningError("INTEGER_RANGE_EMPTY", "容量范围内没有整数"))
+            number = clamp(round(number), lo, hi)
+        elseif kind == "tier"
+            # C-401：离散档位量化（吸附到最近档位）
+            tiers = Float64.(get(variable, "tiers", nothing) isa AbstractVector ?
+                            variable["tiers"] : [lower, upper])
+            tiers = filter(tier -> lower <= tier <= upper, tiers)
+            isempty(tiers) && throw(CapacityPlanningError("TIER_RANGE_EMPTY", "容量范围内没有合法档位"))
+            number = tiers[argmin(abs.(tiers .- number))]
+        else
+            raw_step = get(variable, "step", nothing)
+            step = raw_step isa Real ? Float64(raw_step) : 0.0
+            if step > 0
+                # C-401：吸附到 step 的整数倍网格（0 对齐），候选恒为整数；
+                # 不再锚在下界上——下界 = 当前值×系数，常带小数，会传染给全部候选
+                k_lo = ceil(lower / step)
+                k_hi = floor(upper / step)
+                k = round(number / step)
+                number = k_lo <= k_hi ? clamp(k, k_lo, k_hi) * step : clamp(number, lower, upper)
+            else
+                number = clamp(number, lower, upper)
+            end
+            number = clamp(number, lower, upper)
         end
-        push!(quantized, clamp(number, lower, upper))
+        push!(quantized, number)
     end
     return quantized
+end
+
+"""
+    _variable_constraint_violation(variables, optimized_values) -> Union{Nothing,String}
+
+C-401 结构约束后验检查（优化器只支持盒约束，成组/互斥在量化后校验）：
+- 互斥组：同组至多一个变量（含 fixed）偏离现有容量；
+- 成组比例：以组内 ratio 最大者为基准，其余成员按 ratio 等比联动，容差取成员 step 的一半。
+违约返回原因字符串，否则返回 nothing。
+"""
+function _variable_constraint_violation(variables, optimized_values)
+    optimized_index = 0
+    assigned = Dict{String,Float64}()
+    for variable in variables
+        value = if variable["mode"] == "optimize"
+            optimized_index += 1
+            Float64(optimized_values[optimized_index])
+        else
+            Float64(variable["fixedValue"])
+        end
+        assigned[string(variable["componentId"])] = value
+    end
+
+    # 互斥：同组至多一个偏离现有容量
+    mutex_seen = Dict{String,String}()
+    for variable in variables
+        mutex = get(variable, "mutexGroup", nothing)
+        mutex === nothing && continue
+        component_id = string(variable["componentId"])
+        abs(get(assigned, component_id, 0.0) - Float64(variable["currentValue"])) <= 1.0e-9 && continue
+        mutex = string(mutex)
+        if haskey(mutex_seen, mutex)
+            return "互斥组 $(mutex)：$(mutex_seen[mutex]) 与 $(component_id) 同时偏离现有容量"
+        end
+        mutex_seen[mutex] = component_id
+    end
+
+    # 成组：v_i / v_base = ratio_i / ratio_base（基准取 ratio 最大者）
+    groups = Dict{String,Vector{Any}}()
+    for variable in variables
+        gid = get(variable, "groupId", nothing)
+        gid === nothing && continue
+        push!(get!(groups, string(gid), Any[]), variable)
+    end
+    for (gid, members) in groups
+        base = members[argmax([Float64(m["groupRatio"]) for m in members])]
+        base_id = string(base["componentId"])
+        base_value = get(assigned, base_id, 0.0)
+        for member in members
+            member === base && continue
+            expected = base_value / Float64(base["groupRatio"]) * Float64(member["groupRatio"])
+            raw_step = get(member, "step", 0.0)
+            step = raw_step isa Real ? abs(Float64(raw_step)) : 0.0
+            tolerance = max(step * 0.5, abs(expected) * 1.0e-6)
+            actual = get(assigned, string(member["componentId"]), 0.0)
+            abs(actual - expected) > tolerance &&
+                return "成组 $(gid)：$(member["componentId"]) 取 $(actual)，按基准 $(base_id)=$(base_value) 的比例应为 $(expected)"
+        end
+    end
+    return nothing
 end
 
 function _candidate_payload(variables, optimized_values)
@@ -51,6 +136,34 @@ function _candidate_payload(variables, optimized_values)
     return result
 end
 
+"""
+    _original_capacities(project_snapshot, canvas_id, variables) -> Dict{String,Float64}
+
+C-401 第二增量：从（变更前）项目快照读取各规划组件的原始容量，
+供生命周期经济计算退役/替换的处置回收。
+"""
+function _original_capacities(project_snapshot::AbstractDict, canvas_id::String, variables)
+    _, canvas = _candidate_canvas(project_snapshot, canvas_id)
+    nodes_by_id = Dict{String,Any}()
+    for node in get(canvas, "nodes", [])
+        nodes_by_id[string(get(node, "id", ""))] = node
+    end
+    capacities = Dict{String,Float64}()
+    for item in variables
+        component_id = string(get(item, "componentId", ""))
+        node = get(nodes_by_id, component_id, nothing)
+        node === nothing && continue
+        business = get(get(node, "data", Dict{String,Any}()), "business", Dict{String,Any}())
+        params = get(business, "commonTechParams", Dict{String,Any}())
+        raw = get(params, "capacity", nothing)
+        if raw isa Real
+            number = Float64(raw)
+            isfinite(number) && (capacities[component_id] = number)
+        end
+    end
+    return capacities
+end
+
 function _candidate_hash(task, scenario_set, values, economic_version)
     payload = Dict(
         "projectSnapshotHash" => task["projectSnapshotHash"],
@@ -62,8 +175,40 @@ function _candidate_hash(task, scenario_set, values, economic_version)
     return bytes2hex(SHA.sha256(Vector{UInt8}(codeunits(JSON3.write(payload)))))
 end
 
+"""
+    _safe_rm_workdir(path) -> Bool
+
+清理候选工作目录（BUG-005）：Windows 下场景 timeseries.db 的 SQLite 句柄可能
+尚未 finalize，直接 rm 会 EBUSY 并把整个规划任务拖死。改为失败时 GC 促一次
+finalize 后重试，仍失败仅告警跳过并保留残留目录——清理失败不影响结果正确性，
+绝不向上抛出。
+"""
+function _safe_rm_workdir(path::String)
+    isdir(path) || return true
+    for attempt in 1:3
+        try
+            rm(path; recursive=true, force=true)
+            return true
+        catch error
+            if attempt < 3
+                # 促使未 finalize 的 SQLite.DB 句柄释放文件锁
+                GC.gc(true)
+                sleep(0.5)
+            else
+                @warn "候选工作目录清理失败，保留残留目录（不影响规划结果）" path exception=(error, catch_backtrace())
+                return false
+            end
+        end
+    end
+    return false
+end
+
 function _planning_cancelled(ctx)
-    return isready(ctx.signal_ch) && take!(ctx.signal_ch) == :cancel
+    ctx.cancel_requested[] && return true
+    if isready(ctx.signal_ch) && take!(ctx.signal_ch) == :cancel
+        ctx.cancel_requested[] = true
+    end
+    return ctx.cancel_requested[]
 end
 
 function _planning_phase_progress!(planning_id, phase, started_ns; kwargs...)
@@ -99,6 +244,49 @@ function _planning_result_variables(variables, best_candidate)
     return result
 end
 
+"""Finalize only committed, fully evaluated candidates (also used after a hard deadline)."""
+function complete_planning_from_evaluations!(planning_id::String; stop_reason::Union{Nothing,String}=nothing)
+    task = get_planning_task(planning_id)
+    evaluations = list_planning_evaluations(planning_id)
+    feasible = filter(item -> item["feasible"] && isfinite(item["fitness"]), evaluations)
+    isempty(feasible) && throw(CapacityPlanningError("NO_FEASIBLE_CANDIDATE", "评价预算内没有找到可行容量方案"))
+    best = first(sort(feasible; by=item -> (item["fitness"], item["ordinal"])))
+    directory = planning_task_dir(planning_id)
+    scenarios = JSON3.read(read(joinpath(directory, "scenarios.json"), String), Dict{String,Any})
+    history = Dict{String,Any}[]
+    running_best = Inf
+    for item in evaluations
+        item["feasible"] && (running_best = min(running_best, Float64(item["fitness"])))
+        push!(history, Dict("ordinal"=>item["ordinal"], "fitness"=>item["fitness"],
+            "feasible"=>item["feasible"], "bestSoFar"=>isfinite(running_best) ? running_best : nothing))
+    end
+    warnings = String.(get(best["breakdown"], "warnings", String[]))
+    stop_reason !== nothing && push!(warnings, stop_reason)
+    result = Dict{String,Any}(
+        "planningId"=>planning_id, "projectId"=>task["projectId"], "canvasId"=>task["canvasId"],
+        "projectUpdatedAt"=>task["projectUpdatedAt"], "scenarioSetHash"=>scenarios["scenarioSetHash"],
+        "fitness"=>best["fitness"], "breakdown"=>best["breakdown"], "warnings"=>warnings,
+        "economicEvaluatorVersion"=>get(task["config"]["economics"], "evaluator", DEFAULT_CAPACITY_EVALUATOR_VERSION),
+        "simulationEvaluatorVersion"=>CAPACITY_EVALUATOR_VERSION,
+        "variables"=>_planning_result_variables(task["config"]["variables"], best["candidate"]),
+        "bestCandidate"=>best["candidate"], "evaluationCount"=>length(evaluations),
+        "failedEvaluationCount"=>count(item -> !item["feasible"], evaluations), "convergence"=>history,
+        "scenarioSummary"=>Dict("config"=>scenarios["config"], "quality"=>scenarios["quality"],
+            "scenarios"=>[Dict(key=>item[key] for key in ("scenarioId","representativeDate","weightDays","probability")) for item in scenarios["scenarios"]]),
+    )
+    set_best_planning_evaluation!(planning_id, best["id"])
+    save_planning_result!(planning_id, result)
+    write(joinpath(directory, "result.json"), JSON3.write(result))
+    progress = Dict{String,Any}(task["progress"])
+    merge!(progress, Dict("phase"=>"completed", "completedEvaluations"=>length(evaluations),
+        "failedEvaluations"=>result["failedEvaluationCount"], "bestFitness"=>best["fitness"],
+        "bestCandidate"=>best["candidate"], "convergence"=>history, "cancellationRequested"=>false,
+        "currentScenario"=>nothing, "stopReason"=>stop_reason))
+    update_planning_progress!(planning_id, progress)
+    set_planning_status!(planning_id, "completed")
+    return result
+end
+
 """运行一个已冻结的规划任务。调用方负责捕获异常并更新终态。"""
 function run_capacity_optimization!(planning_id::String, ctx)
     lock(PLANNING_OPTIMIZER_LOCK) do
@@ -122,7 +310,13 @@ function run_capacity_optimization!(planning_id::String, ctx)
         _planning_phase_progress!(planning_id, "clustering", started_ns)
         _planning_cancelled(ctx) && throw(PlanningCancelled("规划任务已取消"))
         scenario_set = perf_measure("planning", planning_id, "scenario_reduce") do
-            reduce_boundary_scenarios(config["clustering"])
+            reduce_boundary_scenarios(config["clustering"], string(task["canvasId"]), snapshot)
+        end
+        # C-402：预览与运行同版本校验——边界数据在预览后被修改时给出明确告警
+        preview_hash = get(get(config, "clustering", Dict{String,Any}()), "scenarioPreviewHash", nothing)
+        if preview_hash !== nothing && string(preview_hash) != string(scenario_set["scenarioSetHash"])
+            push!(get!(scenario_set["quality"], "warnings", String[]),
+                "场景集与预览时不一致（边界数据可能在预览后被修改），预览 hash=$(preview_hash)，当前 hash=$(scenario_set["scenarioSetHash"])")
         end
         save_planning_scenarios!(planning_id, scenario_set)
         save_scenario_set_series!(planning_id, scenario_set["scenarios"])
@@ -131,7 +325,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
         optimizer = config["optimizer"]
         economics_config = config["economics"]
         economic_evaluator = economic_evaluator_from_config(economics_config)
-        economic_version = OPERATING_OBJECTIVE_EVALUATOR_VERSION
+        economic_version = economic_evaluator_version(economic_evaluator)
         failure_penalty = Float64(optimizer["failurePenalty"])
         max_evaluations = Int(optimizer["maxFuncEvals"])
         variables_optimized = [item for item in variables if item["mode"] == "optimize"]
@@ -139,13 +333,20 @@ function run_capacity_optimization!(planning_id::String, ctx)
         search_range = [(Float64(item["lowerBound"]), Float64(item["upperBound"])) for item in variables_optimized]
         units = Dict(string(item["componentId"]) => string(item["unit"]) for item in variables)
 
+        original_capacities = _original_capacities(snapshot, string(task["canvasId"]), variables)
+
         # 任务级 COPT 环境：整个优化循环复用同一个 Env；任务结束后在 finally 中强制释放，
         # 避免残留句柄/内存影响下一次任务，否则第二次运行易出现 COPT_CreateEnv ReadOnlyMemoryError。
         copt_env = nothing
         optimizer_factory = nothing
         try
-            copt_env = COPT.Env()
-            optimizer_factory = () -> COPT.Optimizer(copt_env)
+            solver_name = get_solver_name(Dict{String,Any}(get(snapshot, "algorithm", Dict())))
+            if solver_name == "COPT"
+                copt_env = COPT.Env()
+                optimizer_factory = () -> COPT.Optimizer(copt_env)
+            else
+                optimizer_factory = solver_optimizer(solver_name)
+            end
 
             set_planning_status!(planning_id, "optimizing")
             progress = _planning_phase_progress!(
@@ -198,6 +399,8 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 work_dir = joinpath(planning_dir, "work", candidate_hash[1:16])
 
                 try
+                    violation = _variable_constraint_violation(variables, values)
+                    violation === nothing || throw(CapacityPlanningError("VARIABLE_CONSTRAINT_VIOLATION", violation))
                     candidate_snapshot, capacities = perf_measure("planning", planning_id, "candidate_snapshot";
                         meta=Dict("ordinal" => ordinal)) do
                         apply_capacity_candidate(snapshot, task["canvasId"], variables, values)
@@ -209,9 +412,13 @@ function run_capacity_optimization!(planning_id::String, ctx)
                         task["canvasId"],
                         scenario_set,
                         work_dir;
-                        options=EvaluationOptions(layer_id=string(config["planningLayerId"])),
+                        options=EvaluationOptions(layer_id=string(config["planningLayerId"]),
+                            scenario_time_limit_seconds=min(60.0, Float64(get(optimizer, "maxTimeSeconds", 60.0)))),
                         planning_id=planning_id,
                         optimizer_factory=optimizer_factory,
+                        cancel_check=() -> _planning_cancelled(ctx),
+                        progress_callback=info -> _planning_phase_progress!(planning_id, "optimizing", started_ns;
+                            currentEvaluation=ordinal, currentScenario=info),
                     )
                     end
                     if simulation.feasible
@@ -224,13 +431,23 @@ function run_capacity_optimization!(planning_id::String, ctx)
                                 units=units,
                                 simulation=simulation,
                                 config=economics_config,
+                                layer_id=string(config["planningLayerId"]),
+                                work_dir=work_dir,
+                                project_snapshot=candidate_snapshot,
+                                change_kinds=Dict{String,String}(string(item["componentId"]) => string(get(item, "changeKind", "new")) for item in variables),
+                                original_capacities=original_capacities,
                             ),
                         )
                         end
                         evaluation_fitness = economic.fitness
                         breakdown = Dict{String,Any}(economic.breakdown)
                         breakdown["scenarioMetrics"] = simulation.scenario_metrics
+                        breakdown["indicators"] = Dict{String,Any}(economic.indicators)
+                        breakdown["warnings"] = economic.warnings
                         warnings = economic.warnings
+                        if any(!get(metric, "optimal", true) for metric in simulation.scenario_metrics)
+                            push!(warnings, "部分典型场景达到单场景时限，使用已有可行解参与评价，尚未证明场景最优。")
+                        end
                         feasible = true
                         consecutive_failed[] = 0
                     else
@@ -238,6 +455,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                         error_message = simulation.error_message
                     end
                 catch error
+                    error isa PlanningCancelled && rethrow()
                     error_code = error isa CapacityPlanningError ? error.code : "EVALUATION_ERROR"
                     error_message = error isa CapacityPlanningError ? error.message : sprint(showerror, error)
                 end
@@ -269,7 +487,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     previous_best_dir = best_work_dir[]
                     if previous_best_dir !== nothing && previous_best_dir != work_dir && isdir(previous_best_dir)
                         perf_measure("planning", planning_id, "candidate_cleanup") do
-                            rm(previous_best_dir; recursive=true, force=true)
+                            _safe_rm_workdir(previous_best_dir)
                         end
                     end
                     best_fitness[] = evaluation_fitness
@@ -280,7 +498,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     set_best_planning_evaluation!(planning_id, evaluation_id)
                 elseif isdir(work_dir)
                     perf_measure("planning", planning_id, "candidate_cleanup") do
-                        rm(work_dir; recursive=true, force=true)
+                        _safe_rm_workdir(work_dir)
                     end
                 end
 
@@ -299,6 +517,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     bestFitness=isfinite(best_fitness[]) ? best_fitness[] : nothing,
                     bestCandidate=best_candidate[],
                     convergence=live_history,
+                    currentScenario=nothing,
                 )
                 consecutive_failed[] >= 1000 && throw(CapacityPlanningError(
                     "TOO_MANY_FAILED_EVALUATIONS", "连续 1000 个候选评价失败，请检查边界数据和容量范围",
@@ -327,63 +546,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 BlackBoxOptim.bboptimize(fitness, suggested; kwargs...)
             end
 
-            best_candidate[] === nothing && throw(CapacityPlanningError(
-                "NO_FEASIBLE_CANDIDATE", "评价预算内没有找到可行容量方案",
-            ))
-            evaluations = list_planning_evaluations(planning_id)
-            best_history = Dict{String,Any}[]
-            running_best = Inf
-            for item in evaluations
-                if item["feasible"]
-                    running_best = min(running_best, Float64(item["fitness"]))
-                end
-                push!(best_history, Dict(
-                    "ordinal" => item["ordinal"],
-                    "fitness" => item["fitness"],
-                    "feasible" => item["feasible"],
-                    "bestSoFar" => isfinite(running_best) ? running_best : nothing,
-                ))
-            end
-
-            result = Dict{String,Any}(
-                "planningId" => planning_id,
-                "projectId" => task["projectId"],
-                "canvasId" => task["canvasId"],
-                "projectUpdatedAt" => task["projectUpdatedAt"],
-                "scenarioSetHash" => scenario_set["scenarioSetHash"],
-                "fitness" => best_fitness[],
-                "breakdown" => best_breakdown[],
-                "warnings" => best_warnings[],
-                "economicEvaluatorVersion" => economic_version,
-                "simulationEvaluatorVersion" => CAPACITY_EVALUATOR_VERSION,
-                "variables" => _planning_result_variables(variables, best_candidate[]),
-                "bestCandidate" => best_candidate[],
-                "evaluationCount" => completed[],
-                "failedEvaluationCount" => failed[],
-                "convergence" => best_history,
-                "scenarioSummary" => Dict(
-                    "config" => scenario_set["config"],
-                    "quality" => scenario_set["quality"],
-                    "scenarios" => [Dict(
-                        "scenarioId" => item["scenarioId"],
-                        "representativeDate" => item["representativeDate"],
-                        "weightDays" => item["weightDays"],
-                        "probability" => item["probability"],
-                    ) for item in scenario_set["scenarios"]],
-                ),
-            )
-            save_planning_result!(planning_id, result)
-            write(joinpath(planning_dir, "result.json"), JSON3.write(result))
-            _planning_phase_progress!(
-                planning_id, "completed", started_ns;
-                completedEvaluations=completed[],
-                failedEvaluations=failed[],
-                bestFitness=best_fitness[],
-                bestCandidate=best_candidate[],
-                convergence=best_history,
-            )
-            set_planning_status!(planning_id, "completed")
-            return result
+            return complete_planning_from_evaluations!(planning_id)
         finally
             # 任务结束后强制释放 COPT 环境，避免残留句柄/内存影响下一次任务
             optimizer_factory = nothing

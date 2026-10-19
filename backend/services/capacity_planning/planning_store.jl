@@ -57,6 +57,7 @@ function get_planning_store()
         if PLANNING_STORE_REF[] === nothing
             mkpath(dirname(PLANNING_DB_PATH))
             db = SQLite.DB(PLANNING_DB_PATH)
+            _exec(db, "PRAGMA busy_timeout=5000")
             _exec(db, "PRAGMA foreign_keys=ON")
             _exec(db, "PRAGMA journal_mode=WAL")
             _exec(db, """
@@ -195,6 +196,17 @@ function get_planning_task(planning_id::String)
     return lock(PLANNING_STORE_LOCK) do
         rows = _query(db, PLANNING_TASK_SELECT * " WHERE id = ?", (planning_id,))
         isempty(rows.id) ? nothing : _planning_task_record(rows, 1)
+    end
+end
+
+function update_planning_elapsed!(planning_id::String, elapsed_ms::Int)
+    db = get_planning_store()
+    lock(PLANNING_STORE_LOCK) do
+        _exec(db, """
+            UPDATE planning_tasks
+            SET progress_json=json_set(progress_json, '\$.elapsedMs', ?), updated_at=?
+            WHERE id=? AND status NOT IN ('completed','failed','cancelled')
+        """, (elapsed_ms, _planning_now(), planning_id))
     end
 end
 

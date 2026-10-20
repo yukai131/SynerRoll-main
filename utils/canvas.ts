@@ -392,6 +392,35 @@ export const createEmptyCanvas = (name = '画布1'): CanvasData => ({
   updatedAt: new Date().toISOString()
 })
 
+/**
+ * 克隆画布并重生成 canvas/node/edge ID，同步改写边的 source/target。
+ * 用于项目复制、容量规划「应用到新画布」等需要独立身份的场景，避免跨画布/跨项目 ID 混用。
+ */
+export const cloneCanvasWithFreshIds = (canvas: CanvasData): CanvasData => {
+  const nodeIdMap = new Map<string, string>()
+  const nodes = canvas.nodes.map(node => {
+    const nextId = createId('node')
+    nodeIdMap.set(node.id, nextId)
+    return { ...deepClone(node), id: nextId }
+  })
+  const edges = canvas.edges.map(edge => {
+    const cloned = deepClone(edge)
+    return {
+      ...cloned,
+      id: createId('edge'),
+      source: nodeIdMap.get(cloned.source) ?? cloned.source,
+      target: nodeIdMap.get(cloned.target) ?? cloned.target
+    }
+  })
+
+  return {
+    ...deepClone(canvas),
+    id: createId('canvas'),
+    nodes,
+    edges
+  }
+}
+
 export const resolveDefinitionNodeSize = (definition: ComponentDefinition): { width: number; height: number } => {
   return {
     width: definition.defaultSize.width,

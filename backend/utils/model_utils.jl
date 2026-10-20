@@ -1,6 +1,6 @@
 const BIG_M = 1e10
 const DEFAULT_SOLVER = "HiGHS"
-const SUPPORTED_SOLVERS = ("HiGHS", "COPT", "SCIP")
+const SUPPORTED_SOLVERS = ("HiGHS", "COPT")
 
 function get_solver_name(algorithms::Dict{String,Any})
     raw_name = strip(string(get(algorithms, "solver", DEFAULT_SOLVER)))
@@ -14,20 +14,8 @@ end
 function solver_optimizer(solver_name::String)
     solver_name == "HiGHS" && return HiGHS.Optimizer
     solver_name == "COPT" && return COPT.Optimizer
-    solver_name == "SCIP" && return _scip_optimizer()
+    
     error("Unsupported solver $(solver_name).")
-end
-
-function _scip_optimizer()
-    if isdefined(Main, :SCIP)
-        return Main.SCIP.Optimizer
-    end
-    try
-        @eval using SCIP
-        return SCIP.Optimizer
-    catch e
-        error("SCIP solver is not available. Install with Pkg.add(\"SCIP\") and ensure artifacts downloaded. $(sprint(showerror, e))")
-    end
 end
 
 function generate_timespan(layer::Dict{String, Any})
@@ -142,3 +130,14 @@ end
 
 current_layer_storage_value(ctx::BuildContext) = current_layer_storage_value(ctx, "", "ES", "E_ES")
 current_layer_storage_value(ctx::BuildContext, code::String) = current_layer_storage_value(ctx, code, "ES", "E_ES")
+
+# ── 单位换算 ─────────────────────────────────────────────────────────────
+# 前端 ramp 统一为 %/min（容量百分比每分钟）；模型侧统一用 1/h（每小时容量倍率）。
+# 1 %/min = 0.01 /min = 0.6 /h。
+"""
+    ramp_per_min_to_per_hour(x) -> Float64
+
+将前端 ramp（%/min）换算为模型使用的 1/h 容量倍率。
+"""
+ramp_per_min_to_per_hour(x::Real)::Float64 = Float64(x) * 60.0 / 100.0
+

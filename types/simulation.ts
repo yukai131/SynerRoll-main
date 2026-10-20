@@ -30,7 +30,7 @@ export const DEFAULT_LAYER_CONFIG: LayerConfigSet = {
 // 算法与求解器配置（Project 级别）
 // ============================================================
 
-export type SolverName = 'HiGHS' | 'COPT' | 'SCIP'
+export type SolverName = 'HiGHS' | 'COPT'
 
 export interface AlgorithmConfig {
   electricityLoadPrediction: string
@@ -38,7 +38,12 @@ export interface AlgorithmConfig {
   optimizationAlgorithm: string
   solver: SolverName
   slackEnabled: boolean
-  slackPenalty: number
+  /** @deprecated 旧单一松弛系数；兼容读取，新请用 shortagePenalty / excessPenalty */
+  slackPenalty?: number
+  /** 缺供惩罚（元/kWh），默认 1000 */
+  shortagePenalty: number
+  /** 过剩惩罚（元/kWh），默认 50 */
+  excessPenalty: number
 }
 
 export interface SolverConfig {

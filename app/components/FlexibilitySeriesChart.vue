@@ -7,7 +7,6 @@ import {
 } from '~~/utils/timeLabel'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { getDeviceColor } from '~~/config/device-colors'
-import { useVisibleChart } from '~~/composables/useVisibleChart'
 import AppModal from '~/components/AppModal.vue'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
@@ -15,7 +14,6 @@ const DEFICIT_COLOR = '#F04438'
 
 const props = defineProps<{
   rows: FlexibilityPeriodResult[]
-  resultRevision?: number
   direction: 'up' | 'down'
   deviceLabels?: Record<string, string>
   simStartTime?: string
@@ -42,8 +40,6 @@ const marginVisible = ref(true)
 const selectedDeficitTimestamp = ref<string | null>(null)
 const deficitDetailOpen = ref(false)
 let chart: echarts.ECharts | null = null
-const { schedule: scheduleRender } = useVisibleChart(chartRef, () => render(),
-  () => chart, () => props.direction + ' flexibility', () => props.resultRevision ?? 0, 'flexibility')
 let contributionChart: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
 
@@ -73,7 +69,9 @@ const DEVICE_TYPE_LABELS: Record<string, string> = {
   FS: '飞轮储能',
   CS: '压缩空气储能',
   PS: '抽水蓄能',
-  HYDRO: '常规水电'
+  HYDRO: '常规水电',
+  GRID: '电网',
+  HGRID: '氢网'
 }
 
 const directionLabel = computed(() => props.direction === 'up' ? '上调' : '下调')
@@ -429,7 +427,7 @@ const renderSystemChart = () => {
   })
 
   chart.setOption({
-    animation: false,
+    animation: true,
     animationDuration: 300,
     animationDurationUpdate: 220,
     animationEasing: 'cubicOut',
@@ -570,7 +568,7 @@ const renderContributionChart = () => {
   }))
 
   contributionChart.setOption({
-    animation: false,
+    animation: true,
     animationDuration: 300,
     animationDurationUpdate: 220,
     animationEasing: 'cubicOut',
@@ -628,7 +626,7 @@ const render = () => {
 
 watch(
   [() => props.rows, () => props.direction, rangeStartMinutes, rangeEndMinutes],
-  scheduleRender
+  render
 )
 
 watch(contributionDisplayMode, renderContributionChart)

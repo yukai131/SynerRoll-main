@@ -462,6 +462,8 @@ function run_single_layer_task(task_id::String, task::Dict)
         end
         build_result === nothing && return nothing
         all_layers, nodes = build_result
+        flexibility_config = flexibility_evaluation_config_from_task(task)
+
 
         # 验证目标层是否存在
         if !haskey(all_layers, target_layer_id)
@@ -480,7 +482,10 @@ function run_single_layer_task(task_id::String, task::Dict)
             sim_end_time=get(task, "sim_end_time", nothing),
             sim_start_date=get(task, "sim_start_date", nothing),
             sim_end_date=get(task, "sim_end_date", nothing),
-            boundary_ids=_canvas_boundary_ids(project_json, string(task["canvas_id"])),
+            boundary_ids=unique(vcat(
+                _canvas_boundary_ids(project_json, string(task["canvas_id"])),
+                flexibility_config === nothing ? String[] : flexibility_boundary_ids(flexibility_config),
+            )),
         )
         end
         boundary_result === nothing && return nothing
@@ -642,7 +647,7 @@ function run_task(task_id::String, task::Dict)
             sim_end_time=get(task, "sim_end_time", nothing),
             sim_start_date=get(task, "sim_start_date", nothing),
             sim_end_date=get(task, "sim_end_date", nothing),
-            boundary_ids=_canvas_boundary_ids(project_json, string(task["canvas_id"])),
+            boundary_ids=unique(vcat(_canvas_boundary_ids(project_json, string(task["canvas_id"])), flexibility_config === nothing ? String[] : flexibility_boundary_ids(flexibility_config))),
         )
         end
         boundary_result === nothing && return nothing

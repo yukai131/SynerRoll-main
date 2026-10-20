@@ -9,7 +9,7 @@ function resolve_hydro_power_params(component::HydroPower, ctx::BuildContext)
     paras = component_paras(component)
     time_step_hours = step_hours(ctx.layer)
 
-    ramp_rate_kw_per_hour = paras["ramp"] * paras["capacity"]
+    ramp_rate_kw_per_hour = ramp_per_min_to_per_hour(paras["ramp"]) * paras["capacity"]
 
     return (
         layer_settings=layer_settings,

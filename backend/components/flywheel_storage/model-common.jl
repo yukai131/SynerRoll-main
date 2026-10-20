@@ -13,7 +13,7 @@ function resolve_flywheel_storage_params(component::FlywheelStorage, ctx::BuildC
         status=layer_settings["status"],
         capacity=component_paras(component)["capacity"],
         efficiency=component_paras(component)["η"],
-        ramp_ratio=component_paras(component)["ramp"],
+        ramp_ratio=ramp_per_min_to_per_hour(component_paras(component)["ramp"]),
         time_step_hours=time_step_hours,
         min_soc=component_paras(component)["min"],
         max_soc=component_paras(component)["max"],

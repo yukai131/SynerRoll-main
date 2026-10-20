@@ -1,4 +1,5 @@
 import type {
+  CopyProjectRequest,
   CreateProjectRequest,
   ProjectDetailResponse,
   ProjectListResponse,
@@ -18,6 +19,8 @@ export const useProjectApi = () => {
     getProject: (projectId: string) => apiClient.get<ProjectDetailResponse>(`/project/${projectId}`),
     createProject: (payload: CreateProjectRequest) =>
       apiClient.mutate<ProjectDetailResponse>('/project', { method: 'POST', body: payload }),
+    copyProject: (projectId: string, payload: CopyProjectRequest = {}) =>
+      apiClient.mutate<ProjectDetailResponse>(`/project/${projectId}/copy`, { method: 'POST', body: payload }),
     updateProject: (projectId: string, payload: UpdateProjectRequest) =>
       apiClient.mutate<ProjectDetailResponse>(`/project/${projectId}`, { method: 'PUT', body: payload }),
     deleteProject: (projectId: string) => apiClient.mutate<{ projectId: string }>(`/project/${projectId}`, { method: 'DELETE' }),

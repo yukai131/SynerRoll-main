@@ -89,7 +89,7 @@ using Test
     @test only(filter(i -> i.cost_type == "adjust_cost", sitems)).value ≈ 15.0  # 0+10 + 0+5
 
     # 松弛
-    slack = calc_slack_penalty("b1", "总线", [1.0, 2.0], [0.0], 100.0, "1")
+    slack = calc_slack_penalty("b1", "总线", [1.0, 2.0], [0.0], 100.0, 50.0, "1")
     @test length(slack) == 1
     @test slack[1].value ≈ 300.0
     @test slack[1].is_slack

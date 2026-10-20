@@ -39,7 +39,7 @@ export const componentUIConfigs: Record<string, ComponentUIConfig> = {
   },
   CP: {
     icon: 'factory',
-    iconSrc: deviceIcon('coal-plant'),
+    iconSrc: deviceIcon('gas-plant'),
     canvasType: 'energy',
     defaultSize: { width: 150, height: 150 },
     appearance: createAppearance('#FFF1F0', getDeviceColor('CP'))
@@ -109,7 +109,7 @@ export const componentUIConfigs: Record<string, ComponentUIConfig> = {
   },
   GP: {
     icon: 'factory',
-    iconSrc: deviceIcon('gas-plant'),
+    iconSrc: deviceIcon('coal-plant'),
     canvasType: 'energy',
     defaultSize: { width: 150, height: 150 },
     appearance: createAppearance('#FFF7ED', getDeviceColor('GP'))
@@ -134,6 +134,13 @@ export const componentUIConfigs: Record<string, ComponentUIConfig> = {
     canvasType: 'energy',
     defaultSize: { width: 150, height: 150 },
     appearance: createAppearance('#F5F3FF', getDeviceColor('GRID'))
+  },
+  HGRID: {
+    icon: 'grid',
+    iconSrc: deviceIcon('hydrogen-grid'),
+    canvasType: 'energy',
+    defaultSize: { width: 150, height: 150 },
+    appearance: createAppearance('#F0FDFA', getDeviceColor('HGRID'))
   },
   HYDRO: {
     icon: 'hydro',

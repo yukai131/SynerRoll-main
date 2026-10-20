@@ -13,8 +13,8 @@ function resolve_hydrogen_storage_params(component::HydrogenStorage, ctx::BuildC
         status=layer_settings["status"],
         capacity=component_paras(component)["capacity"],
         efficiency=component_paras(component)["η"],
-        # ramp 是最大进出流量倍率（1/h）：倍率 × 储量 = kg/h。
-        ramp_ratio=component_paras(component)["ramp"],
+        # ramp 前端为 %/min，此处已换算为 1/h 流量倍率：倍率 × 储量 = kg/h。
+        ramp_ratio=ramp_per_min_to_per_hour(component_paras(component)["ramp"]),
         time_step_hours=time_step_hours,
         min_soc=component_paras(component)["min"],
         max_soc=component_paras(component)["max"],

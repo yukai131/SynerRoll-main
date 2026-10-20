@@ -141,3 +141,63 @@ export const syncBoundaryStateFromNodes = (
     boundaries: nextBoundaries
   }
 }
+
+/**
+ * 双向校准：以「边界.relatedComponents ∪ 节点.boundaryIds」为准，
+ * 同时写回两侧，避免单侧清空导致另一侧被覆盖丢失。
+ * 页面加载 / 跨页返回时调用，修复历史脏数据或单边保存造成的不一致。
+ */
+export const reconcileBoundaryBindings = (
+  workspace: CanvasWorkspace,
+  boundaries: BoundaryItem[]
+) => {
+  const allNodeIds = getAllNodeIds(workspace)
+  const validBoundaryIds = new Set(boundaries.map(boundary => boundary.id))
+
+  // node.id -> Set(boundaryId)
+  const nodeToBoundaryIds = new Map<string, Set<string>>()
+  const ensureNode = (nodeId: string) => {
+    if (!nodeToBoundaryIds.has(nodeId)) {
+      nodeToBoundaryIds.set(nodeId, new Set())
+    }
+    return nodeToBoundaryIds.get(nodeId)!
+  }
+
+  for (const node of workspace.canvases.flatMap(canvas => canvas.nodes)) {
+    for (const boundaryId of getNodeBoundaryIds(node)) {
+      if (validBoundaryIds.has(boundaryId)) {
+        ensureNode(node.id).add(boundaryId)
+      }
+    }
+  }
+
+  for (const boundary of boundaries) {
+    for (const nodeId of dedupeStrings(boundary.relatedComponents)) {
+      if (allNodeIds.has(nodeId)) {
+        ensureNode(nodeId).add(boundary.id)
+      }
+    }
+  }
+
+  const nextWorkspace: CanvasWorkspace = {
+    ...workspace,
+    canvases: workspace.canvases.map(canvas => ({
+      ...canvas,
+      nodes: canvas.nodes.map(node =>
+        setNodeBoundaryIds(node, [...(nodeToBoundaryIds.get(node.id) ?? [])])
+      )
+    }))
+  }
+
+  const nextBoundaries = boundaries.map(boundary => ({
+    ...boundary,
+    relatedComponents: dedupeStrings(
+      [...allNodeIds].filter(nodeId => nodeToBoundaryIds.get(nodeId)?.has(boundary.id))
+    )
+  }))
+
+  return {
+    workspace: nextWorkspace,
+    boundaries: nextBoundaries
+  }
+}

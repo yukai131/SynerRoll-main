@@ -11,7 +11,7 @@ function resolve_coal_power_params(component::CoalPower, ctx::BuildContext)
         status=layer_settings["status"],
         capacity=component_paras(component)["capacity"],
         efficiency=component_paras(component)["η"],
-        ramp_ratio=component_paras(component)["ramp"] * time_step_hours,
+        ramp_ratio=ramp_per_min_to_per_hour(component_paras(component)["ramp"]) * time_step_hours,
         min_output_ratio=component_paras(component)["min"],
         min_on_steps=Int(round(component_paras(component)["T_min_on"] / time_step_hours)),
         min_off_steps=Int(round(component_paras(component)["T_min_off"] / time_step_hours)),

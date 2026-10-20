@@ -21,7 +21,7 @@ function resolve_pumped_storage_params(component::PumpedStorage, ctx::BuildConte
         η_pump=η_pump,
         η_turbine=η_turbine,
         efficiency=sqrt(η_pump * η_turbine),  # 综合往返效率取几何平均
-        ramp_ratio=component_paras(component)["ramp"],
+        ramp_ratio=ramp_per_min_to_per_hour(component_paras(component)["ramp"]),
         time_step_hours=time_step_hours,
         min_soc=component_paras(component)["min"],
         max_soc=component_paras(component)["max"],

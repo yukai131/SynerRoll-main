@@ -229,12 +229,12 @@ const onSelectCategory = (categoryKey: ComponentCategoryKey) => {
               <div v-else-if="globalSearchResults.length > 0" class="space-y-3">
                 <section v-for="category in globalSearchResults" :key="category.key" class="space-y-2">
                   <div class="text-sm font-medium text-app-text px-2">{{ category.label }}</div>
-                  <div class="grid grid-cols-3 gap-2">
+                  <div class="grid grid-cols-2 gap-2">
                     <button
                       v-for="item in category.items"
                       :key="item.key"
                       type="button"
-                      class="flex min-h-[64px] cursor-grab flex-col items-center justify-center gap-2 border border-transparent text-center transition hover:bg-white"
+                      class="flex min-h-[112px] cursor-grab flex-col items-center justify-center gap-2 border border-transparent text-center transition hover:bg-white"
                       :class="{ 'bg-white': hoveredComponentKey === item.key }"
                       :title="item.label"
                       draggable="true"
@@ -243,8 +243,8 @@ const onSelectCategory = (categoryKey: ComponentCategoryKey) => {
                       @click="onComponentClick(item)"
                       @dragstart="onDragStart($event, item.key)"
                     >
-                      <span class="inline-flex h-10 w-10 items-center justify-center rounded-[10px] text-app-text">
-                        <AppIcon :name="item.icon" :src="item.iconSrc" :size="36" :fallback-text="item.label.slice(0, 1)" />
+                      <span class="inline-flex h-16 w-16 items-center justify-center rounded-[12px] text-app-text">
+                        <AppIcon :name="item.icon" :src="item.iconSrc" :size="64" :fallback-text="item.label.slice(0, 1)" />
                       </span>
                       <span class="text-xs leading-4 text-app-text">{{ item.label }}</span>
                     </button>
@@ -274,13 +274,13 @@ const onSelectCategory = (categoryKey: ComponentCategoryKey) => {
 
                   <div
                     v-if="expandedGroupKeys[group.key]"
-                    class="grid grid-cols-3 gap-2"
+                    class="grid grid-cols-2 gap-2"
                   >
                     <button
                       v-for="item in group.items"
                       :key="item.key"
                       type="button"
-                      class="flex min-h-[64px] cursor-grab flex-col items-center justify-center gap-2 border border-transparent text-center transition hover:bg-white"
+                      class="flex min-h-[112px] cursor-grab flex-col items-center justify-center gap-2 border border-transparent text-center transition hover:bg-white"
                       :class="{ 'bg-white': hoveredComponentKey === item.key }"
                       :title="item.label"
                       draggable="true"
@@ -289,8 +289,8 @@ const onSelectCategory = (categoryKey: ComponentCategoryKey) => {
                       @click="onComponentClick(item)"
                       @dragstart="onDragStart($event, item.key)"
                     >
-                      <span class="inline-flex h-10 w-10 items-center justify-center rounded-[10px] text-app-text">
-                        <AppIcon :name="item.icon" :src="item.iconSrc" :size="36" :fallback-text="item.label.slice(0, 1)" />
+                      <span class="inline-flex h-16 w-16 items-center justify-center rounded-[12px] text-app-text">
+                        <AppIcon :name="item.icon" :src="item.iconSrc" :size="64" :fallback-text="item.label.slice(0, 1)" />
                       </span>
                       <span class="text-xs leading-4 text-app-text">{{ item.label }}</span>
                     </button>

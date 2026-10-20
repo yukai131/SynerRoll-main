@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { sliceTimeSeries, pointMinutes } from '~~/utils/time-series-window'
-import { useVisibleChart } from '~~/composables/useVisibleChart'
 import * as echarts from 'echarts'
 import type { ChartDisplayWindow } from '~~/utils/display-window'
 import {
@@ -28,7 +26,6 @@ const props = withDefaults(
     liveData: Record<string, Record<string, Point[]>>
     /** 当前选中的时层 ID */
     layerId: string
-    resultCursor?: number
     /** 节点 code → 设备名称映射，如 { "7e8a": "风机1" } */
     codeToLabel: Record<string, string>
     /** 图表显示模式 */
@@ -84,6 +81,8 @@ function getSeriesName(varName: string): string {
   const deviceName = getDeviceName(varName)
   if (/^E_GRID_in(?:_|$)/.test(varName)) return `${deviceName}（售电）`
   if (/^E_GRID_out(?:_|$)/.test(varName)) return `${deviceName}（购电）`
+  if (/^H_HGRID_in(?:_|$)/.test(varName)) return `${deviceName}（售氢）`
+  if (/^H_HGRID_out(?:_|$)/.test(varName)) return `${deviceName}（购氢）`
   if (/^E_(?:ES|PS|FS|CS)_in(?:_|$)/.test(varName)) return `${deviceName}（充电）`
   if (/^E_(?:ES|PS|FS|CS)_out(?:_|$)/.test(varName)) return `${deviceName}（放电）`
   return deviceName
@@ -204,7 +203,10 @@ function calcContribution(vars: string[]): ContributionItem[] {
   const deviceMap = new Map<string, { name: string; value: number; color: string }>()
   for (const varName of vars) {
     const code = extractCode(varName)
-    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
+    const data = getVarData(varName).filter(p => {
+      const m = timeLabelToMinutes(p.ts)
+      return m >= startMin && m < endMin
+    })
     const stepHours = props.timeStepMinutes / 60
     const totalEnergy = data.reduce((sum, p) => sum + Math.abs(p.value) * stepHours, 0)
     const current = deviceMap.get(code)
@@ -312,7 +314,6 @@ interface RenewableMetricItem {
   label: string
   value: string
   unit: string
-  hint: string
 }
 
 function formatRate(numerator: number, denominator: number): string {
@@ -331,35 +332,30 @@ const renewableMetrics = computed<RenewableMetricItem[]>(() => {
       label: '弃风量',
       value: formatEnergy(wind.cut),
       unit: 'kWh',
-      hint: 'Σ 弃风功率 × Δt'
     },
     {
       key: 'wind-cut-rate',
       label: '弃风率',
       value: formatRate(wind.cut, wind.available),
       unit: '%',
-      hint: '弃风量 / 可用风电量'
     },
     {
       key: 'solar-cut-energy',
       label: '弃光量',
       value: formatEnergy(solar.cut),
       unit: 'kWh',
-      hint: 'Σ 弃光功率 × Δt'
     },
     {
       key: 'solar-cut-rate',
       label: '弃光率',
       value: formatRate(solar.cut, solar.available),
       unit: '%',
-      hint: '弃光量 / 可用光电量'
     },
     {
       key: 're-utilization',
       label: '新能源利用率',
       value: formatRate(usedEnergy, availableEnergy),
       unit: '%',
-      hint: '风光发电量 / 风光可用发电量'
     }
   ]
 })
@@ -471,10 +467,6 @@ const CHART_GRID_BOTTOM = 30
 const containerRef = ref<HTMLDivElement | null>(null)
 const chartRef = ref<HTMLDivElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
-const { schedule: scheduleRender } = useVisibleChart(chartRef, () => {
-  renderChart()
-  renderDetailCharts()
-}, () => chartInstance, () => props.busLabel, () => props.resultCursor ?? 0)
 let resizeObserver: ResizeObserver | null = null
 
 const renderChart = () => {
@@ -489,8 +481,11 @@ const renderChart = () => {
   // 收集所有时间戳
   const allTsSet = new Set<number>()
   for (const varName of props.variables) {
-    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
-    data.forEach(p => allTsSet.add(pointMinutes(p)))
+    const data = getVarData(varName).filter(p => {
+      const m = timeLabelToMinutes(p.ts)
+      return m >= startMin && m < endMin
+    })
+    data.forEach(p => allTsSet.add(timeLabelToMinutes(p.ts)))
   }
   let allTs = Array.from(allTsSet).sort((a, b) => a - b)
   // 大视窗抽稀时间轴，避免万级柱子；小窗保持全精度
@@ -508,7 +503,10 @@ const renderChart = () => {
   // 源和荷共用一个 stack，正数自然向上、负数自然向下，保证同时刻对齐
 
   for (const varName of sourceVars.value) {
-    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
+    const data = getVarData(varName).filter(p => {
+      const m = timeLabelToMinutes(p.ts)
+      return m >= startMin && m < endMin
+    })
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), p.value]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
 
@@ -523,7 +521,10 @@ const renderChart = () => {
   }
 
   for (const varName of displayedSinkVars.value) {
-    const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
+    const data = getVarData(varName).filter(p => {
+      const m = timeLabelToMinutes(p.ts)
+      return m >= startMin && m < endMin
+    })
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), -Math.abs(p.value)]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
 
@@ -540,7 +541,10 @@ const renderChart = () => {
   if (props.displayMode === 'loadTracking' && electricLoadVars.value.length > 0) {
     const totalLoadByTime = new Map<number, number>()
     for (const varName of electricLoadVars.value) {
-      const data = sliceTimeSeries(getVarData(varName), startMin, endMin)
+      const data = getVarData(varName).filter(p => {
+        const m = timeLabelToMinutes(p.ts)
+        return m >= startMin && m < endMin
+      })
       for (const point of data) {
         const minute = timeLabelToMinutes(point.ts)
         totalLoadByTime.set(minute, (totalLoadByTime.get(minute) ?? 0) + Math.abs(point.value))
@@ -643,11 +647,19 @@ watch(
     () => props.simStartDate,
     () => props.displayWindow,
   ],
-  scheduleRender
+  () => {
+    const t0 = performance.now()
+    renderChart()
+    renderDetailCharts()
+    const ms = performance.now() - t0
+    if (ms > 50) {
+      console.info(`[Probe] EnergyFlowChart render ${ms.toFixed(0)}ms`)
+    }
+  }
 )
 
 onMounted(() => {
-  scheduleRender()
+  renderChart()
   resizeObserver = new ResizeObserver(() => {
     chartInstance?.resize()
     sourceDonutChart?.resize()
@@ -713,7 +725,6 @@ onBeforeUnmount(() => {
       <div v-if="hasRenewableDevices" class="overflow-hidden rounded-[8px] border border-app-border bg-white">
         <div class="border-b border-app-border bg-app-panel-soft px-4 py-3">
           <h4 class="text-sm font-medium text-app-text">新能源消纳指标</h4>
-          <p class="mt-1 text-xs text-app-muted">按当前可见时段统计；可用发电量缺省时以「出力 + 弃电」还原</p>
         </div>
         <div class="grid grid-cols-2 gap-px bg-app-border md:grid-cols-3 xl:grid-cols-5">
           <div
@@ -726,7 +737,6 @@ onBeforeUnmount(() => {
               <span class="text-lg font-semibold text-app-text">{{ item.value }}</span>
               <span class="text-xs text-app-muted">{{ item.unit }}</span>
             </div>
-            <div class="mt-1 text-[11px] text-app-muted">{{ item.hint }}</div>
           </div>
         </div>
       </div>

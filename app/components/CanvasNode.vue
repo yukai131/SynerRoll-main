@@ -71,13 +71,30 @@ const getHandleOffsetStyle = (port: PortDefinition): Record<string, string> => {
     nodeHeight.value
   )
 
+  // 能源节点：端口略向图标方向内收，避免连线端点离图标过远
+  const inset = definition.value?.canvasType === 'energy' ? 10 : 0
+
   switch (rotatedSide) {
     case 'top':
+      return {
+        marginLeft: `${x}px !important`,
+        ...(inset ? { top: `${inset}px !important` } : {})
+      }
     case 'bottom':
-      return { marginLeft: `${x}px !important` }
+      return {
+        marginLeft: `${x}px !important`,
+        ...(inset ? { bottom: `${inset}px !important` } : {})
+      }
     case 'left':
+      return {
+        marginTop: `${y}px !important`,
+        ...(inset ? { left: `${inset}px !important` } : {})
+      }
     case 'right':
-      return { marginTop: `${y}px !important` }
+      return {
+        marginTop: `${y}px !important`,
+        ...(inset ? { right: `${inset}px !important` } : {})
+      }
     default:
       return {}
   }
@@ -132,17 +149,28 @@ const getLabelOffsetStyle = (port: PortDefinition): Record<string, string> => {
 
 const wrapperStyle = computed(() => {
   const style = props.data.style
+  const isEnergy = definition.value?.canvasType === 'energy'
 
+  // 能源设备节点：无边框无底色，图标自带美术，只保留布局与文字色
   return {
     width: `${style.width}px`,
     height: `${style.height}px`,
-    background: style.fillColor,
-    border: `${style.strokeWidth}px solid ${style.strokeColor}`,
-    borderRadius: `${style.borderRadius}px`,
+    background: isEnergy ? 'transparent' : style.fillColor,
+    border: isEnergy ? 'none' : `${style.strokeWidth}px solid ${style.strokeColor}`,
+    borderRadius: isEnergy ? '0' : `${style.borderRadius}px`,
     color: style.textColor,
     fontSize: `${style.fontSize}px`,
     opacity: `${style.opacity}`
   }
+})
+
+const iconBoxSize = computed(() => {
+  const { width, height } = props.data.style
+  const base = Math.min(width, height)
+  // 图标尽量占满节点，缩小与端口之间的空白
+  return fullIconMode.value
+    ? Math.max(48, Math.round(base * 0.86))
+    : Math.max(40, Math.round(base * 0.72))
 })
 </script>
 
@@ -226,21 +254,20 @@ const wrapperStyle = computed(() => {
     >
       <div
         v-if="definition.canvasType === 'energy'"
-        class="flex h-full w-full flex-col items-center justify-center gap-1 px-3 py-2 text-center"
+        class="flex h-full w-full flex-col items-center justify-center overflow-hidden"
       >
         <span
-          :class="fullIconMode ? 'h-full w-full' : 'h-1/2 w-1/2'"
-          class="inline-flex items-center justify-center overflow-hidden rounded-xl bg-white/90 text-app-text shadow-sm"
+          class="inline-flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden"
         >
           <AppIcon
             :name="definition.icon"
             :src="definition.iconSrc"
-            :size="fullIconMode ? 72 : 36"
-            :style="{ width: '100%', height: '100%' }"
+            :size="iconBoxSize"
+            class="max-h-full max-w-full object-contain"
             :fallback-text="definition.label.slice(0, 1)"
           />
         </span>
-        <div v-if="!fullIconMode" class="max-w-full">
+        <div v-if="!fullIconMode" class="w-full max-w-full shrink-0 px-1 pb-0.5 text-center">
           <p v-if="pageConfig?.labelLanguage !== 'hidden'" class="truncate font-semibold leading-tight" :style="{ fontSize: data.style.fontSize + 'px', color: data.style.textColor }">
             {{ pageConfig?.labelLanguage === 'english' ? definition.key : definition.label }}
           </p>

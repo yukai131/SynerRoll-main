@@ -261,7 +261,7 @@ end
 | 功能 | 状态 | 说明 |
 |---|---|---|
 | 第五步优化进度与结果展示 | 已实现基础结构 | 可在 `app/pages/capacity-planning/[projectId].vue` 中查看 |
-| 第六步“应用最优解并启动滚动仿真” | 前端已调用，后端路由缺失 | `applyAndSimulate()` 调用 `/capacity-planning/{id}/apply-and-simulate`，该接口当前不存在 |
+| 第六步“应用最优解并启动滚动仿真” | 已实现（C-406 apply-and-simulate + 预览 + 撤销） | `applyAndSimulate()` 调用 `/capacity-planning/{id}/apply-and-simulate`，该接口当前不存在 |
 | NPV/IRR/LCOE/投资回收期展示 | 前端有展示位 | 最小版本中可隐藏或显示“未计算”占位 |
 
 ---

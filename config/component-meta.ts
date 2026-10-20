@@ -26,6 +26,7 @@ export const componentGroups: ComponentGroup[] = [
   { key: 'bus', label: '总线', description: '能源总线' },
   { key: 'power-external-source', label: '外部源', description: '外部能源来源' },
   { key: 'power-converter', label: '转换设备', description: '能源转换设备' },
+  { key: 'hydrogen-external-source', label: '外部源', description: '外部氢源' },
   { key: 'hydrogen-converter', label: '转换设备', description: '氢能转换设备' },
   { key: 'hydrogen-storage', label: '氢储能', description: '氢气储能设备' },
   { key: 'electric-storage', label: '电储能', description: '电力储能设备' },
@@ -35,7 +36,7 @@ export const componentGroups: ComponentGroup[] = [
 export const componentCategories: ComponentCategory[] = [
   { key: 'bus', label: '总线', description: '能源总线', icon: 'bus', groups: ['bus'] },
   { key: 'power', label: '电力系统', description: '电力生产与传输', icon: 'power', groups: ['power-external-source', 'power-converter'] },
-  { key: 'hydrogen', label: '氢能系统', description: '氢能系统', icon: 'hydrogen', groups: ['hydrogen-converter', 'hydrogen-storage'] },
+  { key: 'hydrogen', label: '氢能系统', description: '氢能系统', icon: 'hydrogen', groups: ['hydrogen-external-source', 'hydrogen-converter', 'hydrogen-storage'] },
   { key: 'storage', label: '储能', description: '储能系统', icon: 'storage', groups: ['electric-storage'] },
   { key: 'load', label: '负荷', description: '能源负荷', icon: 'load', groups: ['time-shift-load'] }
 ]
@@ -66,6 +67,7 @@ export const VARIABLE_DISPLAY_NAMES: Record<string, Record<string, string>> = {
   HLOAD: { H_HLOAD: '氢负荷' },
   QLOAD: { Q_QLOAD: '热负荷' },
   GRID: { E_GRID_in: '上送功率', E_GRID_out: '购入功率' },
+  HGRID: { H_HGRID_in: '上送流量', H_HGRID_out: '购入流量' },
   HYDRO: { E_HYDRO: '输出功率', AVAILABLE_HYDRO: '可用功率', MINIMUM_HYDRO: '最小出力' },
   // 松弛变量
   BUS: { E_SHORTAGE: '缺额功率', E_EXCESS: '过剩功率' },

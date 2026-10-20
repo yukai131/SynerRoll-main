@@ -8,6 +8,7 @@ import type {
   CapacityPlanningTask
 } from '~~/types/capacity-planning'
 import type { CanvasData } from '~~/types/canvas'
+import { cloneCanvasWithFreshIds } from '~~/utils/canvas'
 
 import { apiSuccess } from '#server/utils/response'
 import { insertApply, updateApply } from '#server/utils/apply-store'
@@ -73,8 +74,8 @@ export default defineEventHandler(async (event) => {
     // C-406：目标画布——更新当前画布，或复制出新画布后在新画布上应用
     let targetCanvas: CanvasData
     if (target === 'new-canvas') {
-      const clone = structuredClone(sourceCanvas)
-      clone.id = crypto.randomUUID()
+      // 重生成 canvas/node/edge ID，避免与源画布共享节点身份
+      const clone = cloneCanvasWithFreshIds(sourceCanvas)
       clone.name = (body.newCanvasName ?? '').trim() || `${sourceCanvas.name}-容量方案`
       clone.updatedAt = new Date().toISOString()
       next.workspace.canvases.push(clone)
@@ -86,8 +87,21 @@ export default defineEventHandler(async (event) => {
     targetCanvasId = targetCanvas.id
     canvasSnapshotBefore = structuredClone(targetCanvas)
 
+    // 变量 componentId 指向源画布节点；新画布时按同序映射到新节点
+    const nodeIdMap = new Map<string, string>()
+    if (target === 'new-canvas') {
+      sourceCanvas.nodes.forEach((oldNode, index) => {
+        const newNode = targetCanvas.nodes[index]
+        if (newNode) nodeIdMap.set(oldNode.id, newNode.id)
+      })
+    }
+    else {
+      sourceCanvas.nodes.forEach(node => nodeIdMap.set(node.id, node.id))
+    }
+
     for (const variable of planningResult.variables) {
-      const node = targetCanvas.nodes.find(item => item.id === variable.componentId)
+      const targetNodeId = nodeIdMap.get(variable.componentId) ?? variable.componentId
+      const node = targetCanvas.nodes.find(item => item.id === targetNodeId)
       if (!node?.data) {
         throw createError({ statusCode: 409, message: `设备 ${variable.componentName} 已不存在` })
       }
@@ -99,7 +113,7 @@ export default defineEventHandler(async (event) => {
         throw createError({ statusCode: 409, message: `设备 ${variable.componentName} 的 capacity 已不是数值` })
       }
       changes.push({
-        componentId: variable.componentId,
+        componentId: targetNodeId,
         componentName: variable.componentName,
         unit: variable.unit,
         previousValue: business.commonTechParams.capacity,

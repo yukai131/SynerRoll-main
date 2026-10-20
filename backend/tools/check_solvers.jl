@@ -1,6 +1,6 @@
 # 本地求解器可用性检查（业务无关，仅环境探测）
 # 用法: julia backend/tools/check_solvers.jl
-# 退出码: 0 = HiGHS 可用；COPT/SCIP 仅报告不阻断
+# 退出码: 0 = HiGHS 可用；COPT 仅报告不阻断
 
 println("SynerRoll solver check")
 println("="^40)
@@ -39,16 +39,6 @@ catch e
     false
 end
 
-has_scip = try
-    using SCIP
-    try_solver("SCIP", () -> SCIP.Optimizer)
-catch e
-    println("[FAIL] SCIP not loadable: ", sprint(showerror, e))
-    println("       可执行: julia --project=backend -e 'using Pkg; Pkg.add(\"SCIP\")'")
-    false
-end
-
-println("="^40)
-println("HiGHS=$(has_highs) COPT=$(has_copt) SCIP=$(has_scip)")
+println("HiGHS=$(has_highs) COPT=$(has_copt)")
 println("默认求解器: HiGHS")
 exit(has_highs ? 0 : 1)

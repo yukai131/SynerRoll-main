@@ -9,8 +9,8 @@ withDefaults(
   }>(),
   {
     logoSrc: '/logo.png',
-    logoText: '综合能源系统配置策略优化软件',
-    userName: 'A4Admin'
+    logoText: '新能源发电灵活性量化评估软件',
+    userName: 'LYDL'
   }
 )
 
@@ -39,18 +39,15 @@ defineEmits<{
           <span>返回</span>
         </button>
         <span class="h-5 w-px bg-white/30" aria-hidden="true" />
-        <button type="button" class="flex items-center gap-3 text-left" @click="$emit('navigateHome')">
+        <button type="button" class="flex min-w-0 items-center gap-2.5 text-left" @click="$emit('navigateHome')">
           <img
             v-if="logoSrc"
             :src="logoSrc"
-            alt="SynerRoll Logo"
-            class="h-12 w-12 rounded-lg object-cover"
+            alt="软件主标志"
+            class="h-9 w-auto max-h-10 shrink-0 object-contain"
           >
-          <span
-            v-else
-            class="inline-flex h-12 items-center text-xl font-bold tracking-[0.02em] text-white"
-          >
-            {{ logoText }}
+          <span class="inline-flex min-w-0 items-center text-base font-semibold tracking-[0.02em] text-white lg:text-lg">
+            <span class="truncate">{{ logoText }}</span>
           </span>
         </button>
       </div>

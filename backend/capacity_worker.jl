@@ -7,7 +7,13 @@ function capacity_worker_main(planning_id::String)
     planning_task_dir(planning_id) # validate before writing any task files
     ctx = PlanningContext(Channel{Symbol}(1), nothing)
     try
-        perf_start("planning", planning_id)
+        perf_start("planning", planning_id; meta=Dict{String,Any}(
+            "pid" => getpid(),
+            "julia" => string(VERSION),
+            "perfEnabled" => PERF_ENABLED,
+        ))
+        perf_record("planning", planning_id, "worker_ready", 0.0, 0, 0, 0, "ok",
+            Dict{String,Any}("pid" => getpid()))
         run_capacity_optimization!(planning_id, ctx)
     catch error
         if error isa PlanningCancelled

@@ -274,12 +274,16 @@ function fit_pv_curve(
     coef = X \ p
     a, b, c, d, e = coef[1], coef[2], coef[3], coef[4], coef[5]
 
+    # 满量程参考功率：训练样本峰值（供按装机缩放使用）
+    p_rated_fit = maximum(p)
+
     params = Dict{String,Any}(
         "a" => a,
         "b" => b,
         "c" => c,
         "d" => d,
         "e" => e,
+        "p_rated" => p_rated_fit,
     )
 
     y_pred = evaluate_pv_fitting_curve(g, t, params)

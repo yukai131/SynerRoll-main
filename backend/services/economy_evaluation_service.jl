@@ -38,20 +38,10 @@ end
 # ─── 辅助：项目解析 ──────────────────────────────────────────────────────────
 
 function _safe_get_ts_values(db_path::String, data_key::String, sim_start::String, sim_end::Union{String,Nothing})::Vector{Float64}
-    ts = get_ts(db_path, data_key;
-        min_minutes=time_label_to_minutes(sim_start),
-        max_minutes=sim_end === nothing ? nothing : time_label_to_minutes(sim_end))
+    ts = get_ts(db_path, data_key)
     ts === nothing && return Float64[]
-    return ts.values
-end
-
-function _economy_boundary_window(db_path::String, source_id::String, sim_start::String, sim_end::Union{String,Nothing})
-    key = _query_unique_data_key(db_path; source_id, remark="planned", strict=true)
-    key === nothing && return nothing, nothing
-    series = get_ts(db_path, key;
-        min_minutes=time_label_to_minutes(sim_start),
-        max_minutes=sim_end === nothing ? nothing : time_label_to_minutes(sim_end))
-    return series, key
+    filtered = truncate_timeseries(ts, sim_start, sim_end)
+    return filtered.values
 end
 
 function _get_layers(project_json::Dict)
@@ -179,10 +169,17 @@ function load_component_data(store_path::String, comp_code::String, comp_type::S
         data["fuel"] = _safe_get_ts_values(store_path, "CP|F_CP_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
     elseif comp_type == "WT"
         data["power"] = _safe_get_ts_values(store_path, "WT|E_WT_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
-        data["cut"] = _safe_get_ts_values(store_path, "WT|E_WT_cut_$(comp_code)|cut#$(layer_id)", sim_start, sim_end)
+        # ResultBinding 落库 remark=power；兼容旧测试 remark=cut
+        data["cut"] = _safe_get_ts_values(store_path, "WT|E_WT_cut_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
+        if isempty(data["cut"])
+            data["cut"] = _safe_get_ts_values(store_path, "WT|E_WT_cut_$(comp_code)|cut#$(layer_id)", sim_start, sim_end)
+        end
     elseif comp_type == "PV"
         data["power"] = _safe_get_ts_values(store_path, "PV|E_PV_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
-        data["cut"] = _safe_get_ts_values(store_path, "PV|E_PV_cut_$(comp_code)|cut#$(layer_id)", sim_start, sim_end)
+        data["cut"] = _safe_get_ts_values(store_path, "PV|E_PV_cut_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
+        if isempty(data["cut"])
+            data["cut"] = _safe_get_ts_values(store_path, "PV|E_PV_cut_$(comp_code)|cut#$(layer_id)", sim_start, sim_end)
+        end
     elseif comp_type == "ES"
         data["energy"] = _safe_get_ts_values(store_path, "ES|E_ES_$(comp_code)|energy#$(layer_id)", sim_start, sim_end)
         data["input"] = _safe_get_ts_values(store_path, "ES|E_ES_in_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
@@ -199,6 +196,10 @@ function load_component_data(store_path::String, comp_code::String, comp_type::S
         # E_GRID_in = 上送（售电）；E_GRID_out = 购入（购电）
         data["sell"] = _safe_get_ts_values(store_path, "GRID|E_GRID_in_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
         data["buy"] = _safe_get_ts_values(store_path, "GRID|E_GRID_out_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
+    elseif comp_type == "HGRID"
+        # H_HGRID_in = 上送（售氢）；H_HGRID_out = 购入（购氢）
+        data["sell"] = _safe_get_ts_values(store_path, "HGRID|H_HGRID_in_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
+        data["buy"] = _safe_get_ts_values(store_path, "HGRID|H_HGRID_out_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
     elseif comp_type in ("HS", "FS", "CS", "PS")
         data["energy"] = _safe_get_ts_values(store_path, "$(comp_type)|E_$(comp_type)_$(comp_code)|energy#$(layer_id)", sim_start, sim_end)
         data["input"] = _safe_get_ts_values(store_path, "$(comp_type)|E_$(comp_type)_in_$(comp_code)|power#$(layer_id)", sim_start, sim_end)
@@ -213,7 +214,8 @@ end
 """
     load_boundary_price_series(store_path, boundary_ids, sim_start, sim_end) -> Union{Vector{Float64},Nothing}
 
-从任务时序库读取 price 边界的 planned 曲线，按仿真范围截断。
+从任务时序库读取 fuel_price 边界的 planned 曲线，按仿真范围截断。
+兼容历史 `price` 含义。
 """
 function load_boundary_price_series(
     store_path::String,
@@ -224,24 +226,19 @@ function load_boundary_price_series(
     isempty(boundary_ids) && return nothing
     for bid in boundary_ids
         bid_s = string(bid)
-        ts_label = nothing
         try
-            pair = _economy_boundary_window(store_path, bid_s, sim_start, sim_end)
+            pair = query_ts(store_path; source_id=bid_s, remark="planned")
             ts = pair isa Tuple ? pair[1] : pair
             label = pair isa Tuple ? pair[2] : ""
             ts === nothing && continue
-            label_s = string(label)
-            # 仅接受价格类
-            if !isempty(label_s) && !(occursin("price", lowercase(label_s)) || occursin("价", label_s))
-                # label 格式常为 source|var|remark#layer，检查 var
-                parsed = try
-                    parse_ts_label(label_s)["var_name"]
-                catch
-                    ""
-                end
-                if parsed != "price" && !occursin("price", lowercase(parsed))
-                    continue
-                end
+            parsed = try
+                parse_ts_label(string(label))["var_name"]
+            catch
+                ""
+            end
+            # 仅接受燃料价格类边界（兼容历史 price）
+            if parsed != "fuel_price" && parsed != "price"
+                continue
             end
             filtered = truncate_timeseries(ts, sim_start, sim_end)
             return Float64.(filtered.values)
@@ -252,22 +249,24 @@ function load_boundary_price_series(
     return nothing
 end
 
-"""多条价格边界（GRID 购/售）"""
-function load_boundary_price_series_multi(
+"""
+    load_boundary_price_series_by_meaning(store_path, boundary_ids, meaning, sim_start, sim_end)
+
+按物理含义精确匹配价格边界（var_name == meaning），兼容历史 `price`。
+"""
+function load_boundary_price_series_by_meaning(
     store_path::String,
     boundary_ids::Vector,
+    meaning::String,
     sim_start::String,
     sim_end::Union{String,Nothing};
-    n::Int=2,
+    legacy_meaning::Union{String,Nothing}=nothing,
 )
-    result = Vector{Union{Vector{Float64},Nothing}}(nothing, n)
-    isempty(boundary_ids) && return result
-    slot = 1
+    isempty(boundary_ids) && return nothing
     for bid in boundary_ids
-        slot > n && break
         bid_s = string(bid)
         try
-            pair = _economy_boundary_window(store_path, bid_s, sim_start, sim_end)
+            pair = query_ts(store_path; source_id=bid_s, remark="planned")
             ts = pair isa Tuple ? pair[1] : pair
             label = pair isa Tuple ? pair[2] : ""
             ts === nothing && continue
@@ -276,20 +275,19 @@ function load_boundary_price_series_multi(
             catch
                 ""
             end
-            if parsed != "price" && !occursin("price", lowercase(parsed)) && !occursin("价", string(label))
+            if parsed != meaning && !(legacy_meaning !== nothing && parsed == legacy_meaning)
                 continue
             end
             filtered = truncate_timeseries(ts, sim_start, sim_end)
-            result[slot] = Float64.(filtered.values)
-            slot += 1
+            return Float64.(filtered.values)
         catch
             continue
         end
     end
-    return result
+    return nothing
 end
 """读取松弛变量并生成 CostItem"""
-function load_slack_data(store_path::String, layer_id::String, penalty_rate::Float64, sim_start::String, sim_end::Union{String,Nothing})::Vector{CostItem}
+function load_slack_data(store_path::String, layer_id::String, shortage_penalty_rate::Float64, excess_penalty_rate::Float64, sim_start::String, sim_end::Union{String,Nothing})::Vector{CostItem}
     items = CostItem[]
 
     start_min = time_label_to_minutes(sim_start)
@@ -309,13 +307,8 @@ function load_slack_data(store_path::String, layer_id::String, penalty_rate::Flo
             series_id = rows[1][i]
             var_name_str = String(rows[3][i])
 
-            sql = "SELECT ts, value FROM time_series_data WHERE series_id=? AND ts_min>=?"
-            params = Any[series_id, start_min]
-            if end_min !== nothing
-                sql *= " AND ts_min<?"
-                push!(params, end_min)
-            end
-            data_rows = _query(store.db, sql, params)
+            data_rows = _query(store.db,
+                "SELECT ts, value FROM time_series_data WHERE series_id=?", [series_id])
             isempty(data_rows[1]) && continue
 
             values = Float64[]
@@ -325,7 +318,7 @@ function load_slack_data(store_path::String, layer_id::String, penalty_rate::Flo
             end
 
             if occursin("SHORTAGE", var_name_str)
-                val = sum(values) * penalty_rate
+                val = sum(values) * shortage_penalty_rate
                 if val > 0.0
                     bus_code = replace(var_name_str, "E_SHORTAGE_" => "", "H_SHORTAGE_" => "", "Q_SHORTAGE_" => "")
                     push!(items, CostItem(
@@ -336,7 +329,7 @@ function load_slack_data(store_path::String, layer_id::String, penalty_rate::Flo
                     ))
                 end
             elseif occursin("EXCESS", var_name_str)
-                val = sum(values) * penalty_rate
+                val = sum(values) * excess_penalty_rate
                 if val > 0.0
                     bus_code = replace(var_name_str, "E_EXCESS_" => "", "H_EXCESS_" => "", "Q_EXCESS_" => "")
                     push!(items, CostItem(
@@ -406,6 +399,12 @@ function resolve_component_params_economy_with_step(comp_dict::Dict{String,Any},
             sell_price = get(costs, "sell_price", 0.0) * time_step_hours,
             layer_settings = layer_settings,
         )
+    elseif comp_type == "HGRID"
+        return (
+            buy_price = get(costs, "buy_price", 0.0) * time_step_hours,
+            sell_price = get(costs, "sell_price", 0.0) * time_step_hours,
+            layer_settings = layer_settings,
+        )
     else
         return (
             om_cost = get(costs, "om_cost", 0.0) * time_step_hours,
@@ -430,6 +429,122 @@ function _parse_duration_hours(s::String)
     else
         return parse(Float64, s)
     end
+end
+
+# ─── 单层成本项收集（仿真经济与容量规划共用）────────────────────────────────
+
+"""
+    collect_layer_cost_items(db_path, component_dicts, layer_id, time_step_hours,
+                             sim_start, sim_end, shortage_penalty, excess_penalty) -> NamedTuple
+
+从 timeseries.db 汇总单层成本项。`evaluate_task_economy` 与
+`evaluate_scenario_operating_cost` 共用。
+
+返回：
+- `cost_items`：含松弛惩罚的 CostItem 列表
+- `energy_kwh`：发电类组件正功率电量（LCOE 分母）
+- `tech`：技术指标累计量
+"""
+function collect_layer_cost_items(
+    db_path::String,
+    component_dicts::Vector,
+    layer_id::String,
+    time_step_hours::Float64,
+    sim_start::String,
+    sim_end::Union{String,Nothing},
+    shortage_penalty::Float64,
+    excess_penalty::Float64,
+)
+    cost_items = CostItem[]
+    energy_kwh = 0.0
+    re_used = 0.0
+    re_avail = 0.0
+    hydro_gen = 0.0
+    thermal_gen = 0.0
+    buy_e = 0.0
+    tech_slots = 0
+
+    for comp_dict in component_dicts
+        comp_type = string(comp_dict["type"])
+        comp_code = string(comp_dict["code"])
+        comp_name = string(get(comp_dict, "name", comp_type))
+        comp_node_id = string(get(comp_dict, "nodeId", ""))
+        comp_type in ("ELOAD", "HLOAD", "QLOAD") && continue
+
+        power_data = load_component_data(db_path, comp_code, comp_type, layer_id, sim_start, sim_end)
+        has_data = false
+        for series in values(power_data)
+            if !isempty(series)
+                has_data = true
+                break
+            end
+        end
+        !has_data && continue
+
+        if comp_type in ("WT", "PV")
+            p = max(sum(get(power_data, "power", Float64[]); init=0.0), 0.0)
+            c = max(sum(get(power_data, "cut", Float64[]); init=0.0), 0.0)
+            re_used += p
+            re_avail += p + c
+            tech_slots = max(tech_slots, length(get(power_data, "power", Float64[])), length(get(power_data, "cut", Float64[])))
+        elseif comp_type == "HYDRO"
+            hydro_gen += max(sum(get(power_data, "power", Float64[]); init=0.0), 0.0)
+            tech_slots = max(tech_slots, length(get(power_data, "power", Float64[])))
+        elseif comp_type in ("CP", "GP", "CHP")
+            thermal_gen += max(sum(get(power_data, "power", Float64[]); init=0.0), 0.0)
+            tech_slots = max(tech_slots, length(get(power_data, "power", Float64[])))
+        elseif comp_type == "GRID"
+            buy_e += max(sum(get(power_data, "buy", Float64[]); init=0.0), 0.0)
+            tech_slots = max(tech_slots, length(get(power_data, "buy", Float64[])), length(get(power_data, "sell", Float64[])))
+        end
+
+        if comp_type in ("CP", "WT", "PV", "GP", "CHP", "ET", "HYDRO")
+            series = get(power_data, "power", Float64[])
+            energy_kwh += sum(max.(series, 0.0)) * time_step_hours
+        end
+
+        params = resolve_component_params_economy_with_step(comp_dict, layer_id, time_step_hours)
+        boundary_ids = get(comp_dict, "boundaryIds", String[])
+
+        if !haskey(power_data, "fuel") || isempty(power_data["fuel"])
+            pw = get(power_data, "power", Float64[])
+            paras = get(comp_dict, "paras", Dict{String,Any}())
+            eff = get(paras, "η", get(paras, "η_e", get(paras, "efficiency", nothing)))
+            if eff isa Real && Float64(eff) > 1.0e-9 && !isempty(pw)
+                power_data["fuel"] = Float64[p / Float64(eff) for p in pw]
+            end
+        end
+
+        # 价格：按物理含义匹配（与仿真建模一致）
+        if comp_type in ("CP", "GP", "CHP")
+            bprice = load_boundary_price_series(db_path, boundary_ids, sim_start, sim_end)
+            if bprice !== nothing && !isempty(bprice)
+                npts = max(length(get(power_data, "power", Float64[])), length(bprice), 1)
+                params = merge(params, (fuel_price=scale_price_series(bprice, time_step_hours, npts),))
+            end
+        elseif comp_type in ("GRID", "HGRID")
+            buy_meaning = comp_type == "HGRID" ? "h2_buy_price" : "buy_price"
+            sell_meaning = comp_type == "HGRID" ? "h2_sell_price" : "sell_price"
+            buy_series = load_boundary_price_series_by_meaning(
+                db_path, boundary_ids, buy_meaning, sim_start, sim_end; legacy_meaning="price")
+            sell_series = load_boundary_price_series_by_meaning(
+                db_path, boundary_ids, sell_meaning, sim_start, sim_end; legacy_meaning="price")
+            npts = max(length(get(power_data, "buy", Float64[])), length(get(power_data, "sell", Float64[])), 1)
+            buy_vec = buy_series === nothing ? fill(params.buy_price, npts) : scale_price_series(buy_series, time_step_hours, npts)
+            sell_vec = sell_series === nothing ? fill(params.sell_price, npts) : scale_price_series(sell_series, time_step_hours, npts)
+            params = merge(params, (buy_price=buy_vec, sell_price=sell_vec))
+        end
+
+        append!(cost_items, calc_component_cost(comp_type, comp_node_id, comp_name, power_data, params, layer_id))
+    end
+
+    append!(cost_items, load_slack_data(db_path, layer_id, shortage_penalty, excess_penalty, sim_start, sim_end))
+    return (
+        cost_items=cost_items,
+        energy_kwh=energy_kwh,
+        tech=(re_used=re_used, re_avail=re_avail, hydro_gen=hydro_gen,
+              thermal_gen=thermal_gen, buy_e=buy_e, tech_slots=tech_slots),
+    )
 end
 
 # ─── 汇总 ────────────────────────────────────────────────────────────────────
@@ -497,6 +612,8 @@ function build_economy_metrics(;
     cost_breakdown::Dict{String,Float64},
     is_partial::Bool,
     progress_ratio::Float64,
+    layer_count::Int=0,
+    aggregation::String="mean",
 )::Dict{String,Any}
     start_min = time_label_to_minutes(sim_start)
     end_min = time_label_to_minutes(covered_end)
@@ -583,9 +700,11 @@ function build_economy_metrics(;
         "dailyAvgObjective" => objective_scale["daily"],
         "annualEstimateObjective" => objective_scale["annual"],
         "byCostType" => by_type,
+        "layerCount" => layer_count,
+        "aggregation" => aggregation,
         "note" => is_partial ?
-            "运行中/部分完成：按已覆盖时段统计，年化=日均×365 粗估" :
-            "按已覆盖时段统计，年化=日均×365 粗估",
+            "运行中/部分完成：按已覆盖时段统计；多时层同口径平均（空层不计入），年化=日均×365 粗估" :
+            "按已覆盖时段统计；多时层同口径平均（空层不计入），年化=日均×365 粗估",
     )
 end
 
@@ -657,7 +776,7 @@ function evaluate_task_economy(
     nodes = _get_nodes(project_json)
     component_dicts, node_id_to_code, node_id_to_name = _parse_component_nodes(nodes)
 
-    _, slack_penalty = get_slack_config(algorithms)
+    _, shortage_penalty, excess_penalty = get_slack_config(algorithms)
 
     layer_step_hours = Dict{String,Float64}()
     for layer in layers
@@ -720,12 +839,18 @@ function evaluate_task_economy(
                     npts = max(length(get(power_data, "power", Float64[])), length(bprice), 1)
                     params = merge(params, (fuel_price=scale_price_series(bprice, time_step_hours, npts),))
                 end
-            elseif comp_type == "GRID"
-                # 购/售电价曲线严格独立：第1条→购电，第2条→售电；不共用、不互相回退
-                bprices = load_boundary_price_series_multi(store_path, boundary_ids, sim_start, truncate_end; n=2)
+            elseif comp_type in ("GRID", "HGRID")
+                # 购/售价格按物理含义严格独立匹配
+                # GRID: buy_price/sell_price（元/kWh）；HGRID: h2_buy_price/h2_sell_price（元/kg）
+                buy_meaning = comp_type == "HGRID" ? "h2_buy_price" : "buy_price"
+                sell_meaning = comp_type == "HGRID" ? "h2_sell_price" : "sell_price"
+                buy_series = load_boundary_price_series_by_meaning(
+                    store_path, boundary_ids, buy_meaning, sim_start, truncate_end)
+                sell_series = load_boundary_price_series_by_meaning(
+                    store_path, boundary_ids, sell_meaning, sim_start, truncate_end)
                 npts = max(length(get(power_data, "buy", Float64[])), length(get(power_data, "sell", Float64[])), 1)
-                buy_vec = bprices[1] === nothing ? fill(params.buy_price, npts) : scale_price_series(bprices[1], time_step_hours, npts)
-                sell_vec = bprices[2] === nothing ? fill(params.sell_price, npts) : scale_price_series(bprices[2], time_step_hours, npts)
+                buy_vec = buy_series === nothing ? fill(params.buy_price, npts) : scale_price_series(buy_series, time_step_hours, npts)
+                sell_vec = sell_series === nothing ? fill(params.sell_price, npts) : scale_price_series(sell_series, time_step_hours, npts)
                 params = merge(params, (buy_price=buy_vec, sell_price=sell_vec))
             end
 
@@ -733,7 +858,7 @@ function evaluate_task_economy(
             append!(layer_cost_items, items)
         end
 
-        slack_items = load_slack_data(store_path, layer_id, slack_penalty, sim_start, truncate_end)
+        slack_items = load_slack_data(store_path, layer_id, shortage_penalty, excess_penalty, sim_start, truncate_end)
         append!(layer_cost_items, slack_items)
 
         summary = build_layer_summary(layer_id, layer_name, layer_cost_items)
@@ -754,11 +879,17 @@ function evaluate_task_economy(
         append!(all_cost_items, layer_cost_items)
     end
 
-    # 全局汇总（跨层合计，用于总览指标）
-    total_cost = sum(s.total_cost for s in layer_summaries; init=0.0)
-    objective_value = sum(s.objective_value for s in layer_summaries; init=0.0)
-    slack_total = sum(s.slack_penalty for s in layer_summaries; init=0.0)
-    revenue_total = sum(sum(values(s.revenue_items); init=0.0) for s in layer_summaries; init=0.0)
+    # 全局汇总：多时层是同一时间段的并行求解，总览取各层平均而非累加；
+    # 空层（尚无成本项）排除在平均分母之外，避免运行中进度拖低均值。
+    active_summaries = [s for s in layer_summaries if !isempty(s.cost_breakdown)]
+    n_active = max(length(active_summaries), 1)
+    total_cost = sum(s.total_cost for s in active_summaries; init=0.0) / n_active
+    objective_value = sum(s.objective_value for s in active_summaries; init=0.0) / n_active
+    slack_total = sum(s.slack_penalty for s in active_summaries; init=0.0) / n_active
+    revenue_total = sum(sum(values(s.revenue_items); init=0.0) for s in active_summaries; init=0.0) / n_active
+    for (k, v) in global_cost_breakdown
+        global_cost_breakdown[k] = v / n_active
+    end
 
     covered_end_for_metrics = effective_end !== nothing ? effective_end :
         (cur_time !== nothing ? cur_time : sim_start)
@@ -792,6 +923,8 @@ function evaluate_task_economy(
         cost_breakdown=global_cost_breakdown,
         is_partial=is_partial,
         progress_ratio=progress_ratio,
+        layer_count=length(active_summaries),
+        aggregation="mean",
     )
 
     return Dict(

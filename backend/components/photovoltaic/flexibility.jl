@@ -7,7 +7,7 @@ function calculate_component_flexibility_impl(
     context::ComponentFlexibilityContext,
 )
     paras = component_paras(component)
-    ramp_rate_kw_per_hour = paras["ramp"] * paras["capacity"]
+    ramp_rate_kw_per_hour = ramp_per_min_to_per_hour(paras["ramp"]) * paras["capacity"]
 
     return calculate_renewable_flexibility(
         component,

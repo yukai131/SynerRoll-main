@@ -9,7 +9,7 @@
 const CONTROLLABLE_GENERATOR_TYPES = Set(["CP", "GP", "CHP"])
 const RENEWABLE_GENERATOR_TYPES = Set(["WT", "PV"])
 const ELECTRIC_STORAGE_TYPES = Set(["ES", "FS", "CS", "PS"])
-const ZERO_ELECTRIC_FLEXIBILITY_TYPES = Set(["ELOAD", "HS", "HLOAD", "QLOAD"])
+const ZERO_ELECTRIC_FLEXIBILITY_TYPES = Set(["ELOAD", "HS", "HLOAD", "QLOAD", "HGRID"])
 
 """生成与 `persist_component_results!` 完全一致的组件结果时序标签。"""
 function component_result_data_key(binding::ResultBinding, layer_id::String)
@@ -22,17 +22,11 @@ function _read_persisted_baseline_value(
     data_key::String,
     timestamp::String,
 )
-    value = get_ts_floor(db_path, data_key, timestamp)
-    value !== nothing && return value
-    source_id, var_name, remark, layer_id = _key_to_meta_params(data_key)
-    sid = resolve_series_id(db_path, source_id, var_name, remark, layer_id)
-    sid === nothing && return nothing
-    store = get_store(db_path)
-    has_points = lock(store.write_lock) do
-        !isempty(_query(store.db, "SELECT 1 FROM time_series_data WHERE series_id=? LIMIT 1", [sid])[1])
+    series = get_ts(db_path, data_key)
+    if series === nothing || isempty(series.timestamps)
+        return nothing
     end
-    has_points && error("Time $(timestamp) does not exist in the series and no earlier fallback is available.")
-    return nothing
+    return get_value(series, timestamp)
 end
 
 """
@@ -142,6 +136,36 @@ function _component_ramp_constraint_on(
     return get(constraints, "ramp_constraint_on", default)
 end
 
+"""
+Resolve baseline power and online flag for units that can shut down (CP/GP/CHP/ET).
+
+Shutdown solutions sometimes land at tiny positive values (e.g. 1e-5 kW) due to
+solver noise. Treating those as online makes the flexibility stage fail the
+`minimum_power_kw <= power_kw` check. Snap noise to offline/zero instead.
+"""
+function _resolve_thermal_unit_baseline_power(
+    component::AbstractComponent,
+    power_kw::Float64;
+    numerical_tolerance_kw::Float64,
+)
+    paras = component_paras(component)
+    capacity = Float64(paras["capacity"])
+    min_ratio = Float64(get(paras, "min", 0.0))
+    minimum_power_kw = min_ratio * capacity
+
+    noise_threshold_kw = max(
+        numerical_tolerance_kw,
+        1e-3,
+        capacity * 1e-6,
+        minimum_power_kw * 1e-6,
+    )
+
+    if power_kw <= noise_threshold_kw
+        return 0.0, false
+    end
+    return power_kw, true
+end
+
 function _merge_operating_point_overrides!(
     operating_point::StringAnyDict,
     overrides::AbstractDict,
@@ -162,8 +186,8 @@ end
 将一台组件在一个时刻的原始求解变量转换为灵活性接口的
 `operating_point`。
 
-当前求解结果没有持久化 CP、GP、CHP 和 ET 的启停二进制变量，因此首版按
-`power_kw > numerical_tolerance_kw` 推断 `is_online`。WT 优先使用已落库的
+当前求解结果没有持久化 CP、GP、CHP 和 ET 的启停二进制变量，因此按
+出力是否高于噪声阈值推断 `is_online`（噪声出力归零并视为停机）。WT 优先使用已落库的
 `AVAILABLE_WT`，缺失时用“实际出力 + 弃风”还原；PV 使用“实际出力 + 弃光”
 还原。WT/PV/HYDRO 的 `ramp_constraint_on` 从当前时层约束配置读取。HYDRO
 直接读取实际、可用和最小出力。GRID 的
@@ -192,14 +216,19 @@ function adapt_component_baseline_result(
     end
 
     if component_kind in CONTROLLABLE_GENERATOR_TYPES
-        power_kw = _nonnegative_baseline_result(
+        raw_power_kw = _nonnegative_baseline_result(
             component,
             result_values,
             "E_$(component_kind)",
             tolerance,
         )
+        power_kw, is_online = _resolve_thermal_unit_baseline_power(
+            component,
+            raw_power_kw;
+            numerical_tolerance_kw=tolerance,
+        )
         operating_point["power_kw"] = power_kw
-        operating_point["is_online"] = power_kw > tolerance
+        operating_point["is_online"] = is_online
     elseif component_kind in RENEWABLE_GENERATOR_TYPES
         power_kw = _nonnegative_baseline_result(
             component,
@@ -255,9 +284,14 @@ function adapt_component_baseline_result(
             tolerance,
         )
     elseif component_kind == "ET"
-        power_kw = _nonnegative_baseline_result(component, result_values, "E_ET", tolerance)
+        raw_power_kw = _nonnegative_baseline_result(component, result_values, "E_ET", tolerance)
+        power_kw, is_online = _resolve_thermal_unit_baseline_power(
+            component,
+            raw_power_kw;
+            numerical_tolerance_kw=tolerance,
+        )
         operating_point["power_kw"] = power_kw
-        operating_point["is_online"] = power_kw > tolerance
+        operating_point["is_online"] = is_online
     elseif component_kind == "GRID"
         selling_power_kw = _nonnegative_baseline_result(
             component,

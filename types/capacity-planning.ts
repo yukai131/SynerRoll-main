@@ -189,6 +189,8 @@ export interface CapacityOptimizerConfig {
   maxTimeSeconds?: number
   seed: number
   failurePenalty: number
+  /** 技术约束软惩罚系数（元/百分点）：消纳率/绿电占比/购电占比/稳定性 */
+  technicalPenalty: number
 }
 
 export type CapacityPlanObjective =
@@ -221,6 +223,29 @@ export interface CapacityEconomicConstraintsConfig {
   targetIrrPercent: CapacityConstraint
 }
 
+/** 生命周期经济参数（与 backend lifecycle_economics.jl 字段对齐，snake_case） */
+export interface CapacityLifecycleParams {
+  tax_holiday_years?: number
+  tax_half_years?: number
+  output_vat_rate?: number
+  input_vat_rate?: number
+  construction_vat_rate?: number
+  surcharge_rate?: number
+  working_capital_rate?: number
+  salvage_rate_default?: number
+  staff_salary_wan?: number
+  fixed_om_ratio?: number
+  fixed_om_wan?: number
+  subsidy_yuan_per_kwh?: number
+  capacity_compensation_yuan_per_kw_year?: number
+  replace_cycle_years?: number
+  irr_penalty_weight?: number
+  /** 覆盖默认 operation_years / discount_rate / income_tax_rate 时也可写在此处 */
+  operation_years?: number
+  discount_rate?: number
+  income_tax_rate?: number
+}
+
 export interface CapacityEconomicsConfig {
   // 后验运行成本口径为默认（timeseries-operating-cost-v1）；
   // operating-objective-v1 保留为 JuMP 目标函数参照/调试模式
@@ -231,7 +256,8 @@ export interface CapacityEconomicsConfig {
   technicalConstraints: CapacityTechnicalConstraintsConfig
   economicConstraints: CapacityEconomicConstraintsConfig
   extensions: Record<string, unknown>
-  lifecycle?: Record<string, number>
+  /** 生命周期经济参数；新建任务始终写入，旧任务可缺省 */
+  lifecycle: CapacityLifecycleParams
 }
 
 export interface CreateCapacityPlanningRequest {
@@ -470,9 +496,6 @@ export type CapacityComparisonMetricKey =
   | 'lcoe'
   | 'paybackYears'
   | 'discountedPaybackYears'
-  | 'carbonTons'
-  | 'reliability'
-  | 'flexibility'
 
 export interface CapacityComparisonMetricSource {
   key: CapacityComparisonMetricKey

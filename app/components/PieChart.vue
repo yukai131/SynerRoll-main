@@ -1,6 +1,6 @@
 <script setup lang="ts">
 const props = defineProps<{
-  title: string
+  title?: string
   items: Array<{ label: string; value: number; color: string }>
 }>()
 
@@ -41,7 +41,7 @@ const segments = computed(() => {
 
 <template>
   <div class="bg-white">
-    <div class="mb-2">
+    <div v-if="title" class="mb-2">
       <h3 class="bg-gray-100 p-2 text-sm text-app-text">{{ title }}</h3>
     </div>
     <div class="flex items-center gap-4">

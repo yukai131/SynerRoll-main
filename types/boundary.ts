@@ -56,7 +56,15 @@ export function resolveBoundaryModuleKey(item: {
   const name = item.name ?? ''
 
   if (meaning === 'load' || /负荷|load/i.test(name)) return 'load'
-  if (meaning === 'price' || /价格|电价|price/i.test(name)) return 'price'
+  if (
+    meaning === 'fuel_price' ||
+    meaning === 'buy_price' ||
+    meaning === 'sell_price' ||
+    meaning === 'h2_buy_price' ||
+    meaning === 'h2_sell_price' ||
+    meaning === 'price' ||
+    /价格|电价|氢价|燃.*价|购.*价|售.*价|price/i.test(name)
+  ) return 'price'
   if (/agc/i.test(name) || meaning === 'power') return 'agc'
   if (meaning === 'factor' || /拟合|参数/i.test(name)) return 'device-fitting'
   if (
@@ -92,7 +100,12 @@ export type BoundaryMeaning =
   | 'temperature'    // 温度
   | 'factor'         // 转化因子
   | 'power'          // 输出功率
-  | 'price'          // 价格
+  | 'fuel_price'     // 燃料价格（CP/GP/CHP）
+  | 'buy_price'      // 购电价格（GRID）
+  | 'sell_price'     // 售电价格（GRID）
+  | 'h2_buy_price'   // 购氢价格（HGRID）
+  | 'h2_sell_price'  // 售氢价格（HGRID）
+  | 'price'          // 价格（历史兼容，新数据请用 fuel/buy/sell/h2_buy/h2_sell_price）
   | 'load'           // 负荷
 
 // 中英文映射
@@ -102,6 +115,11 @@ export const BOUNDARY_MEANING_LABELS: Record<BoundaryMeaning, string> = {
   temperature: '温度',
   factor: '转化因子',
   power: '输出功率',
+  fuel_price: '燃料价格',
+  buy_price: '购电价格',
+  sell_price: '售电价格',
+  h2_buy_price: '购氢价格',
+  h2_sell_price: '售氢价格',
   price: '价格',
   load: '负荷'
 }
@@ -114,7 +132,7 @@ export const BOUNDARY_MODULE_MEANINGS: Record<BoundaryModuleKey, BoundaryMeaning
   'device-fitting': ['factor'],
   weather: ['wind_speed', 'irradiance', 'temperature', 'factor', 'power'],
   load: ['load'],
-  price: ['price'],
+  price: ['fuel_price', 'buy_price', 'sell_price', 'h2_buy_price', 'h2_sell_price'],
   agc: ['power']
 }
 
@@ -131,6 +149,40 @@ export function meaningsForModule(
   return allowed
 }
 
+/**
+ * 历史 meaning 兼容（旧版词表 → 新 boundaryKey）
+ * 旧版: other / heat / hydrogen / power(负荷) 等；新版: fuel_price / buy_price / sell_price / load ...
+ * 做双向匹配时必须带上这层，否则旧项目数据会被过滤成「无关联」。
+ */
+const LEGACY_MEANING_ALIASES: Record<string, string[]> = {
+  // 旧「其他」是燃料/价格/转换类的兜底语义（CP/GP/CHP/ET 都用过）
+  other: ['fuel_price', 'buy_price', 'sell_price', 'h2_buy_price', 'h2_sell_price', 'price', 'factor', 'power'],
+  // 旧「热/氢」负荷现归 load；CHP 的 heat 也曾挂在燃料侧
+  heat: ['load', 'fuel_price'],
+  hydrogen: ['load'],
+  // 旧「功率」既可是机组出力也可是负荷，按对方 key 分别放行
+  power: ['power', 'load', 'factor'],
+  price: ['fuel_price', 'buy_price', 'sell_price', 'h2_buy_price', 'h2_sell_price', 'price']
+}
+
+/** 判断组件的 boundaryKey 是否接受某条边界的 meaning（含旧版词表兼容） */
+export function meaningMatchesBoundaryKey(
+  boundaryKey: readonly string[] | undefined,
+  meaning: string
+): boolean {
+  if (!boundaryKey?.length) return false
+  if (boundaryKey.includes(meaning)) return true
+  const aliases = LEGACY_MEANING_ALIASES[meaning]
+  if (aliases && boundaryKey.some(key => aliases.includes(key))) return true
+  // 反向：boundaryKey 里是旧词、meaning 是新词
+  for (const [legacy, modern] of Object.entries(LEGACY_MEANING_ALIASES)) {
+    if (boundaryKey.includes(legacy) && (modern.includes(meaning) || meaning === legacy)) {
+      return true
+    }
+  }
+  return false
+}
+
 /** 物理含义对应的坐标轴单位（空字符串表示无单位） */
 export const BOUNDARY_MEANING_UNITS: Record<BoundaryMeaning, string> = {
   wind_speed: 'm/s',
@@ -138,15 +190,44 @@ export const BOUNDARY_MEANING_UNITS: Record<BoundaryMeaning, string> = {
   temperature: '℃',
   factor: '',
   power: 'kW',
+  fuel_price: '元/kWh',
+  buy_price: '元/kWh',
+  sell_price: '元/kWh',
+  h2_buy_price: '元/kg',
+  h2_sell_price: '元/kg',
   price: '元/kWh',
   load: 'kW'
 }
 
+/**
+ * 含义允许的单位选项。负荷需兼容电/热（kW）与氢（kg/h），
+ * 由边界条目上的 `unit` 字段覆盖默认单位。
+ */
+export const BOUNDARY_MEANING_UNIT_OPTIONS: Partial<Record<BoundaryMeaning, string[]>> = {
+  load: ['kW', 'kg/h'],
+  power: ['kW'],
+  factor: ['', '%', 'p.u.']
+}
+
+/** 读取边界单位：优先条目上的 unit，否则用含义默认单位 */
+export function resolveBoundaryUnit(
+  item: { meaning?: string; unit?: string | null },
+  fallbackMeaning?: BoundaryMeaning | string
+): string {
+  const explicit = (item.unit ?? '').trim()
+  if (explicit) return explicit
+  const key = (item.meaning ?? fallbackMeaning ?? '') as BoundaryMeaning
+  return BOUNDARY_MEANING_UNITS[key] ?? ''
+}
+
 /** 组合展示名：风速 (m/s)；无单位时只返回名称 */
-export function boundaryAxisName(meaning: BoundaryMeaning | string): string {
+export function boundaryAxisName(
+  meaning: BoundaryMeaning | string,
+  unitOverride?: string | null
+): string {
   const key = meaning as BoundaryMeaning
   const label = BOUNDARY_MEANING_LABELS[key] ?? String(meaning)
-  const unit = BOUNDARY_MEANING_UNITS[key]
+  const unit = (unitOverride ?? '').trim() || BOUNDARY_MEANING_UNITS[key]
   return unit ? `${label} (${unit})` : label
 }
 
@@ -160,6 +241,8 @@ export interface BoundaryItem {
   columnName: string
   timeStep: string
   meaning: BoundaryMeaning
+  /** 显式单位覆盖；负荷等多单位含义必填或按此展示（如 load: kW / kg/h） */
+  unit?: string
   relatedComponents: string[]
   interpolateType: InterpolateType
   randomDistribution: RandomDistribution

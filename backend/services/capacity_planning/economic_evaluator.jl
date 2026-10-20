@@ -71,13 +71,55 @@ economic_evaluator_version(::OperatingObjectiveEvaluator) = OPERATING_OBJECTIVE_
 economic_evaluator_version(::TimeseriesOperatingCostEvaluator) = TIMESERIES_OPERATING_COST_EVALUATOR_VERSION
 
 """
+    _slack_unstable_slots(db_path, layer_id, sim_start, sim_end) -> Int
+
+统计窗口内出现缺额/过剩松弛的时段数（任一载能 slack > 0 即计为不稳定），
+对应 c001 §6「供需达标率」的分子时段数。
+"""
+function _slack_unstable_slots(
+    db_path::String,
+    layer_id::String,
+    sim_start::String,
+    sim_end::Union{String,Nothing},
+)
+    start_min = time_label_to_minutes(sim_start)
+    end_min = sim_end !== nothing ? time_label_to_minutes(sim_end) : nothing
+    unstable = Set{Int}()
+    store = get_store(db_path)
+    lock(store.write_lock) do
+        rows = _query(store.db,
+            "SELECT id, layer_id FROM time_series_meta WHERE var_name LIKE '%SHORTAGE%' OR var_name LIKE '%EXCESS%'")
+        isempty(rows[1]) && return
+        for i in 1:length(rows[1])
+            String(rows[2][i]) != layer_id && continue
+            series_id = rows[1][i]
+            sql = "SELECT ts_min, value FROM time_series_data WHERE series_id=? AND ts_min>=?"
+            params = Any[series_id, start_min]
+            if end_min !== nothing
+                sql *= " AND ts_min<?"
+                push!(params, end_min)
+            end
+            data_rows = _query(store.db, sql, params)
+            isempty(data_rows[1]) && continue
+            for (slot_min, val) in zip(data_rows[1], data_rows[2])
+                Float64(val) > 1.0e-6 && push!(unstable, Int(slot_min))
+            end
+        end
+    end
+    return length(unstable)
+end
+
+"""
     evaluate_scenario_operating_cost(db_path, project_snapshot, layer_id) -> NamedTuple
 
 从单个典型场景的 timeseries.db 后验计算运行成本（元），复用经济运行成本服务的组件成本、
 松弛惩罚与参数解析口径，与 `evaluate_task_economy` 单层口径一致
 （见 docs/capacity-planning-minimal-economy-design.md §6.1）。
 
-返回 `(total_cost, cost_breakdown)`；成本为正、收益为负（CostItem 口径）。
+同时后验汇总技术指标（消纳率/绿电占比/购电占比/稳定性），供技术约束软惩罚使用。
+
+返回 `(total_cost, cost_breakdown, revenue_yuan, energy_kwh, technical_metrics)`；
+成本为正、收益为负（CostItem 口径）。
 """
 function evaluate_scenario_operating_cost(
     db_path::String,
@@ -112,56 +154,18 @@ function evaluate_scenario_operating_cost(
     end
     component_dicts, _, _ = _parse_component_nodes(nodes)
     algorithm_cfg = get(project_snapshot, "algorithm", Dict{String,Any}())
-    slack_penalty = Float64(get(algorithm_cfg, "slackPenalty", SLACK_PENALTY_DEFAULT))
+    _, shortage_penalty, excess_penalty = get_slack_config(algorithm_cfg)
 
-    cost_items = CostItem[]
-    for comp_dict in component_dicts
-        comp_type = string(comp_dict["type"])
-        # 负荷类型不产生经济性成本，与运行经济服务一致
-        comp_type in ("ELOAD", "HLOAD", "QLOAD") && continue
-        power_data = load_component_data(
-            db_path, string(comp_dict["code"]), comp_type, layer_id, "0:00", scenario_end)
-        has_data = false
-        for series in values(power_data)
-            if !isempty(series)
-                has_data = true
-                break
-            end
-        end
-        !has_data && continue
-        params = resolve_component_params_economy_with_step(comp_dict, layer_id, time_step_hours)
-        # Match main's runtime economy policy: time-varying prices take precedence.
-        boundary_ids = get(comp_dict, "boundaryIds", String[])
-        if !haskey(power_data, "fuel") || isempty(power_data["fuel"])
-            power = get(power_data, "power", Float64[])
-            paras = get(comp_dict, "paras", Dict{String,Any}())
-            efficiency = get(paras, "η", get(paras, "η_e", get(paras, "efficiency", nothing)))
-            if efficiency isa Real && efficiency > 1.0e-9 && !isempty(power)
-                power_data["fuel"] = power ./ efficiency
-            end
-        end
-        if comp_type in ("CP", "GP", "CHP")
-            price = load_boundary_price_series(db_path, boundary_ids, "0:00", scenario_end)
-            if price !== nothing && !isempty(price)
-                count = max(length(get(power_data, "power", Float64[])), length(price), 1)
-                params = merge(params, (fuel_price=scale_price_series(price, time_step_hours, count),))
-            end
-        elseif comp_type == "GRID"
-            prices = load_boundary_price_series_multi(db_path, boundary_ids, "0:00", scenario_end; n=2)
-            count = max(length(get(power_data, "buy", Float64[])), length(get(power_data, "sell", Float64[])), 1)
-            buy = prices[1] === nothing ? fill(params.buy_price, count) : scale_price_series(prices[1], time_step_hours, count)
-            sell = prices[2] === nothing ? fill(params.sell_price, count) : scale_price_series(prices[2], time_step_hours, count)
-            params = merge(params, (buy_price=buy, sell_price=sell))
-        end
-        append!(cost_items, calc_component_cost(
-            comp_type,
-            string(get(comp_dict, "nodeId", "")),
-            string(get(comp_dict, "name", comp_type)),
-            power_data, params, layer_id))
-    end
-    append!(cost_items, load_slack_data(db_path, layer_id, slack_penalty, "0:00", scenario_end))
+    collected = collect_layer_cost_items(
+        db_path, component_dicts, layer_id, time_step_hours,
+        "0:00", scenario_end, shortage_penalty, excess_penalty,
+    )
+    cost_items = collected.cost_items
+    energy_kwh = collected.energy_kwh
+    tech = collected.tech
 
-    total_cost = sum(item.value for item in cost_items; init=0.0)
+    total_cost = sum(item.value for item in cost_items if item.in_objective || item.is_slack; init=0.0)
+    # 全量会计口径（含未勾选进目标的成本项），便于对照，不进 fitness
     cost_breakdown = Dict{String,Float64}()
     for item in cost_items
         cost_breakdown[item.cost_type] = get(cost_breakdown, item.cost_type, 0.0) + item.value
@@ -170,19 +174,29 @@ function evaluate_scenario_operating_cost(
     revenue_yuan = -sum(item.value for item in cost_items
                         if item.cost_type == "sell_revenue" && item.value < 0; init=0.0)
 
-    # 上网电量（kWh）：发电类组件正功率 × 时层步长，用于 LCOE 分母
-    energy_kwh = 0.0
-    for comp_dict in component_dicts
-        comp_type = string(comp_dict["type"])
-        comp_type in ("CP", "WT", "PV", "GP", "CHP", "ET", "HYDRO") || continue
-        power_data = load_component_data(
-            db_path, string(comp_dict["code"]), comp_type, layer_id, "0:00", scenario_end)
-        # Only electrical output contributes; fuel, heat and curtailment are separate series.
-        series = get(power_data, "power", Float64[])
-        energy_kwh += sum(max.(series, 0.0)) * time_step_hours
+    # ── 技术指标（c001 §6 + 消纳/绿电/购电占比）──
+    re_used, re_avail = tech.re_used, tech.re_avail
+    hydro_gen, thermal_gen, buy_e = tech.hydro_gen, tech.thermal_gen, tech.buy_e
+    tech_slots = tech.tech_slots
+    unstable_slots = _slack_unstable_slots(db_path, layer_id, "0:00", scenario_end)
+    if tech_slots <= 0
+        tech_slots = max(1, round(Int, 24.0 / max(time_step_hours, 1.0e-9)))
     end
+    green_gen = re_used + hydro_gen
+    total_supply = green_gen + thermal_gen + buy_e
+    technical_metrics = Dict{String,Float64}(
+        # 新能源消纳率 = 已调度风光 / (已调度 + 弃电)；无风光时记 100
+        "renewableConsumptionRate" => re_avail > 0 ? 100.0 * re_used / re_avail : 100.0,
+        # 绿电占比 = (风光+水电) / 总供电量；总供电 = 绿电 + 常规 + 购电
+        "greenPowerShare" => total_supply > 0 ? 100.0 * green_gen / total_supply : 100.0,
+        # 购电占比 = 购电 / 总供电量（与绿电同分母，便于对照）
+        "purchasedPowerShare" => total_supply > 0 ? 100.0 * buy_e / total_supply : 0.0,
+        # 稳定性 = 供需达标率 = 1 − 不稳定时段 / 总时段（c001 §6）
+        "stability" => tech_slots > 0 ? 100.0 * (1.0 - unstable_slots / tech_slots) : 100.0,
+    )
     return (total_cost=total_cost, cost_breakdown=cost_breakdown,
-            revenue_yuan=revenue_yuan, energy_kwh=energy_kwh)
+            revenue_yuan=revenue_yuan, energy_kwh=energy_kwh,
+            technical_metrics=technical_metrics)
 end
 
 """C-404 七类正式目标（与 types/capacity-planning.ts CapacityPlanObjective 对齐）。"""
@@ -225,6 +239,141 @@ function _objective_fitness(objective::String, lifecycle, total_cost_yuan::Float
     return (penalty, "未知目标 $(objective)")
 end
 
+const TECHNICAL_CONSTRAINT_KEYS = (
+    "renewableConsumptionRate", "greenPowerShare", "purchasedPowerShare", "stability",
+)
+
+"""目标量纲类别：money（元）/ intensity（元/kWh）/ time（年）/ rate（无量纲）"""
+function _objective_unit(objective::String)::String
+    objective == "lcoe-min" && return "intensity"
+    objective == "payback-period-min" && return "time"
+    objective == "irr-max" && return "rate"
+    return "money"
+end
+
+"""
+    _penalty_in_objective_unit(objective, penalty_yuan, lifecycle, annual_energy_kwh, annual_opex_yuan)
+
+方案 B：把「元」惩罚换算到与目标相同量纲。
+- money：原样返回
+- lcoe：penalty / 年上网电量
+- payback：penalty / 年现金流尺度（CAPEX/n 与 |年运行成本| 的较大者）
+- irr：penalty / CAPEX
+
+分母无效时返回 `nothing`，调用方走方案 C 归一化兜底。
+"""
+function _penalty_in_objective_unit(
+    objective::String,
+    penalty_yuan::Float64,
+    lifecycle,
+    annual_energy_kwh::Float64,
+    annual_opex_yuan::Float64,
+)::Union{Float64,Nothing}
+    unit = _objective_unit(objective)
+    unit == "money" && return penalty_yuan
+    if unit == "intensity"
+        (isfinite(annual_energy_kwh) && annual_energy_kwh > 0) || return nothing
+        return penalty_yuan / annual_energy_kwh
+    end
+    lifecycle === nothing && return nothing
+    capex_yuan = lifecycle.total_capex_wan * 1.0e4
+    if unit == "rate"
+        (isfinite(capex_yuan) && capex_yuan > 0) || return nothing
+        return penalty_yuan / capex_yuan
+    end
+    # unit == "time"
+    n = max(1.0, Float64(length(lifecycle.after_tax_cashflow) - 1))
+    cf_ref = max(capex_yuan / n, abs(annual_opex_yuan), 1.0)
+    isfinite(cf_ref) && cf_ref > 0 || return nothing
+    return penalty_yuan / cf_ref
+end
+
+"""
+    _objective_scale_for_normalize(objective, lifecycle, total_cost_yuan, annual_energy_kwh)
+
+方案 C 兜底：估计目标上界尺度，用于把目标与惩罚压到同阶无量纲再相加。
+"""
+function _objective_scale_for_normalize(
+    objective::String,
+    lifecycle,
+    total_cost_yuan::Float64,
+    annual_energy_kwh::Float64,
+)::Float64
+    unit = _objective_unit(objective)
+    if unit == "money"
+        scale = abs(total_cost_yuan)
+        lifecycle !== nothing && (scale = max(scale, abs(lifecycle.discounted_cost_wan) * 1.0e4))
+        return max(scale, 1.0)
+    elseif unit == "intensity"
+        if lifecycle !== nothing && lifecycle.lcoe_yuan_per_kwh !== nothing
+            return max(abs(lifecycle.lcoe_yuan_per_kwh), 1.0e-6)
+        end
+        return max(abs(total_cost_yuan) / max(annual_energy_kwh, 1.0), 1.0e-6)
+    elseif unit == "time"
+        if lifecycle !== nothing && lifecycle.discounted_payback_years !== nothing
+            return max(abs(lifecycle.discounted_payback_years), 1.0)
+        end
+        return max(Float64(lifecycle === nothing ? 20 : length(lifecycle.after_tax_cashflow) - 1), 1.0)
+    end
+    # rate：IRR 已是 0~1 量级
+    return 1.0
+end
+
+"""
+    _penalty_yuan_scale(penalty_yuan, objective, lifecycle, annual_opex_yuan)
+
+方案 C 兜底：惩罚（元）的尺度，用于与目标同阶归一化。
+"""
+function _penalty_yuan_scale(
+    penalty_yuan::Float64,
+    objective::String,
+    lifecycle,
+    annual_opex_yuan::Float64,
+)::Float64
+    base = abs(penalty_yuan)
+    lifecycle !== nothing && (base = max(base, abs(lifecycle.total_capex_wan) * 1.0e4))
+    base = max(base, abs(annual_opex_yuan), 1.0)
+    # 保证即使当前惩罚为 0，尺度也覆盖满惩罚量级
+    return max(base, 1.0)
+end
+
+"""
+    _technical_constraint_penalty(constraints, metrics, penalty_per_point) -> (penalty, details)
+
+技术约束软惩罚（消纳率/绿电占比/购电占比/稳定性）：
+对启用项按阈值偏差（百分点）× `penalty_per_point`（元/百分点）加性计入 fitness。
+`gte` 取 max(0, threshold − value)，`lte` 取 max(0, value − threshold)。
+"""
+function _technical_constraint_penalty(
+    constraints::AbstractDict,
+    metrics::AbstractDict,
+    penalty_per_point::Float64,
+)
+    penalty = 0.0
+    details = Dict{String,Any}[]
+    for key in TECHNICAL_CONSTRAINT_KEYS
+        raw = get(constraints, key, nothing)
+        raw isa AbstractDict || continue
+        get(raw, "enabled", false) == true || continue
+        haskey(metrics, key) || continue
+        value = Float64(metrics[key])
+        operator = string(get(raw, "operator", "gte"))
+        threshold = Float64(get(raw, "threshold", 0.0))
+        shortfall = operator == "lte" ? max(0.0, value - threshold) : max(0.0, threshold - value)
+        item_penalty = penalty_per_point * shortfall
+        penalty += item_penalty
+        push!(details, Dict{String,Any}(
+            "key" => key,
+            "value" => round(value; digits=4),
+            "operator" => operator,
+            "threshold" => threshold,
+            "shortfall" => round(shortfall; digits=4),
+            "penalty" => item_penalty,
+        ))
+    end
+    return penalty, details
+end
+
 """C-404：economicConstraints 启用的参数覆盖生命周期财务参数。"""
 function _with_lifecycle_params(params::LifecycleFinancialParams; kwargs...)
     fields = Dict{Symbol,Any}(field => getfield(params, field) for field in fieldnames(LifecycleFinancialParams))
@@ -235,18 +384,19 @@ end
 function _apply_economic_constraints!(params::LifecycleFinancialParams, config::AbstractDict)
     constraints = get(config, "economicConstraints", Dict{String,Any}())
     constraints isa AbstractDict || return params
+    # 经济性参数始终生效（前端无勾选）；enabled 仅作兼容字段
     rate = get(constraints, "interestRatePercent", nothing)
-    if rate isa AbstractDict && get(rate, "enabled", false) == true
+    if rate isa AbstractDict
         threshold = Float64(get(rate, "threshold", params.discount_rate * 100))
         params = _with_lifecycle_params(params; discount_rate=max(threshold, 0.0) / 100)
     end
     tax = get(constraints, "taxRatePercent", nothing)
-    if tax isa AbstractDict && get(tax, "enabled", false) == true
+    if tax isa AbstractDict
         threshold = Float64(get(tax, "threshold", params.income_tax_rate * 100))
         params = _with_lifecycle_params(params; income_tax_rate=max(threshold, 0.0) / 100)
     end
     years = get(constraints, "lifecycleYears", nothing)
-    if years isa AbstractDict && get(years, "enabled", false) == true
+    if years isa AbstractDict
         params = _with_lifecycle_params(params;
             operation_years=max(1, round(Int, Float64(get(years, "threshold", params.operation_years)))))
     end
@@ -272,6 +422,7 @@ function evaluate_economics(
     annual_revenue_yuan = 0.0
     annual_opex_yuan = 0.0
     annual_energy_kwh = 0.0
+    tech_weighted = Dict{String,Float64}()
     for metric in input.simulation.scenario_metrics
         get(metric, "feasible", false) == true || throw(CapacityPlanningError(
             "SCENARIO_INFEASIBLE",
@@ -291,10 +442,16 @@ function evaluate_economics(
         # 经营成本 = 总成本 + 售电收益（收益项为负值），含松弛惩罚
         annual_opex_yuan += (scenario.total_cost + scenario.revenue_yuan) * weight_days
         annual_energy_kwh += scenario.energy_kwh * weight_days
+        for (key, value) in scenario.technical_metrics
+            tech_weighted[key] = get(tech_weighted, key, 0.0) + value * weight_days
+        end
         # Release cached SQLite handles before candidate cleanup (Windows file locks).
     end
     total_weight_days > 0 || throw(CapacityPlanningError(
         "SCENARIOS_MISSING", "没有可用的典型场景评价结果"))
+    for key in keys(tech_weighted)
+        tech_weighted[key] /= total_weight_days
+    end
     annual_factor = 365.0 / total_weight_days
     annual_revenue_yuan *= annual_factor
     annual_opex_yuan *= annual_factor
@@ -342,21 +499,50 @@ function evaluate_economics(
     objective_fitness = total_cost
     objective_reason = "ok"
     constraint_penalty = 0.0
+    technical_penalty = 0.0
+    technical_details = Dict{String,Any}[]
     if lifecycle !== nothing
         objective_fitness, objective_reason = _objective_fitness(objective, lifecycle, total_cost)
-        # targetIrrPercent 约束：IRR 低于阈值按差额 × CAPEX 比例惩罚（K-306 NumericPolicy 前的近似）
+        # targetIrrPercent：默认最低内部收益率约束（始终生效），IRR 低于阈值按差额 × CAPEX 惩罚
         constraints = get(input.config, "economicConstraints", Dict{String,Any}())
         target = get(constraints, "targetIrrPercent", nothing)
-        if target isa AbstractDict && get(target, "enabled", false) == true &&
-                lifecycle.irr_after_tax !== nothing
+        if target isa AbstractDict && lifecycle.irr_after_tax !== nothing
             threshold_rate = Float64(get(target, "threshold", 0.0)) / 100
             shortfall = max(0.0, threshold_rate - lifecycle.irr_after_tax)
-            constraint_penalty = shortfall * lifecycle.total_capex_wan * 1.0e4
+            # B12：可配置权重，默认 1.0（= 短差 × CAPEX）
+            irr_weight = Float64(get(get(input.config, "lifecycle", Dict{String,Any}()), "irr_penalty_weight", 1.0))
+            constraint_penalty = shortfall * lifecycle.total_capex_wan * 1.0e4 * max(irr_weight, 0.0)
         end
     elseif objective != "operating-cost-min"
         throw(CapacityPlanningError("LIFECYCLE_MISSING", "生命周期指标缺失，无法评价目标 $(objective)"))
     end
-    evaluation_fitness = objective_fitness + constraint_penalty
+    # 技术约束软惩罚：消纳率/绿电占比/购电占比/稳定性
+    # 惩罚系数优先取任务配置，否则取项目算法配置（建模页「算法配置」弹窗），默认 1e5 元/百分点
+    tech_constraints = get(input.config, "technicalConstraints", Dict{String,Any}())
+    algo_cfg = snapshot isa AbstractDict ? get(snapshot, "algorithm", Dict{String,Any}()) : Dict{String,Any}()
+    tech_penalty_per_point = if haskey(input.config, "technicalPenalty")
+        Float64(input.config["technicalPenalty"])
+    else
+        Float64(get(algo_cfg, "technicalPenalty", 1.0e7))
+    end
+    technical_penalty, technical_details = _technical_constraint_penalty(
+        tech_constraints, tech_weighted, tech_penalty_per_point)
+    constraint_penalty += technical_penalty
+
+    # ── 量纲统一：方案 B 为主（惩罚换算到目标单位），方案 C 兜底（尺度归一化）──
+    penalty_mode = "same-unit"
+    penalty_in_obj_unit = _penalty_in_objective_unit(
+        objective, constraint_penalty, lifecycle, annual_energy_kwh, annual_opex_yuan)
+    if penalty_in_obj_unit !== nothing && isfinite(penalty_in_obj_unit)
+        evaluation_fitness = objective_fitness + penalty_in_obj_unit
+    else
+        penalty_mode = "normalized"
+        obj_scale = _objective_scale_for_normalize(objective, lifecycle, total_cost, annual_energy_kwh)
+        pen_scale = _penalty_yuan_scale(constraint_penalty, objective, lifecycle, annual_opex_yuan)
+        penalty_in_obj_unit = constraint_penalty / pen_scale
+        evaluation_fitness = objective_fitness / obj_scale + penalty_in_obj_unit
+    end
+    isfinite(evaluation_fitness) || (evaluation_fitness = 1.0e18)
     objective_reason != "ok" && push!(lifecycle_warnings, "目标 $(objective): $(objective_reason)")
 
     breakdown = merge(Dict{String,Any}(
@@ -364,6 +550,11 @@ function evaluate_economics(
         "weightedOperatingObjective" => input.simulation.operating_objective,
         "objectiveFitness" => objective_fitness,
         "constraintPenalty" => constraint_penalty,
+        "constraintPenaltyInObjectiveUnit" => penalty_in_obj_unit,
+        "fitnessPenaltyMode" => penalty_mode,
+        "technicalConstraintPenalty" => technical_penalty,
+        "technicalMetrics" => Dict{String,Any}(tech_weighted),
+        "technicalConstraintDetails" => technical_details,
     ), scenario_costs)
     if lifecycle !== nothing
         breakdown["lifecycleCapexWan"] = lifecycle.total_capex_wan
@@ -379,12 +570,17 @@ function evaluate_economics(
             lifecycle.discounted_payback_years
         # C-405 方案比较：逐年税后净现金流（万元，下标 0=建设年），供候选级现金流查看
         breakdown["lifecycleAfterTaxCashflowWan"] = round.(lifecycle.after_tax_cashflow; digits=4)
+        breakdown["lifecycleAnnualFixedOmWan"] = lifecycle.annual_fixed_om_wan
+        breakdown["lifecycleAnnualSubsidyWan"] = lifecycle.annual_subsidy_wan
+        breakdown["lifecycleAnnualCapacityCompensationWan"] = lifecycle.annual_capacity_compensation_wan
+        breakdown["lifecycleReplaceCapexTotalWan"] = lifecycle.replace_capex_total_wan
     end
 
     warnings = [
         "当前使用 $(TIMESERIES_OPERATING_COST_EVALUATOR_VERSION)，fitness = 目标[$(objective)] + 约束惩罚；breakdown.objectiveFitness/constraintPenalty 可拆解。",
         "breakdown.weightedOperatingObjective 为 JuMP 目标函数参照值，仅供与运行成本口径对比。",
         "NPV/IRR/LCOE 为 C-403 全投资口径生命周期指标（公式见 lifecycle_economics.jl 头注释），随所选目标参与 fitness。",
+        "技术约束（消纳率/绿电占比/购电占比/稳定性）为软惩罚，见 breakdown.technicalMetrics / technicalConstraintDetails。",
     ]
     append!(warnings, lifecycle_warnings)
 

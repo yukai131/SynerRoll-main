@@ -179,7 +179,7 @@ function preferredVariables(): DeviceOutputVariable[] {
   ))
   const preferredNames = [
     'E_GP', 'E_CHP', 'E_HYDRO', 'E_WT', 'E_PV', 'E_ES_out', 'E_PS_out',
-    'E_GRID_in', 'E_GRID_out'
+    'E_GRID_in', 'E_GRID_out', 'H_HGRID_in', 'H_HGRID_out'
   ]
   const preferred = preferredNames
     .map(name => available.find(variable => variable.baseVarName === name))

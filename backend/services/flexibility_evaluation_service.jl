@@ -13,6 +13,11 @@ struct FlexibilityEvaluationConfig
     target_poi_power_kw::Any
     upward_requirement_kw::Any
     downward_requirement_kw::Any
+    # 边界引用：与 targetPoiPowerKw / 上下调 value spec 二选一，优先边界
+    # （边界从 1/1 起连续存储，seed 时按仿真日期截取）
+    target_poi_power_boundary_id::Union{Nothing,String}
+    upward_requirement_boundary_id::Union{Nothing,String}
+    downward_requirement_boundary_id::Union{Nothing,String}
 end
 
 const FLEXIBILITY_NETWORK_AUTO = "auto"
@@ -145,35 +150,62 @@ function normalize_flexibility_evaluation_config(
     target_poi_power_kw = nothing
     upward_requirement_kw = nothing
     downward_requirement_kw = nothing
+    target_poi_power_boundary_id = nothing
+    upward_requirement_boundary_id = nothing
+    downward_requirement_boundary_id = nothing
+
+    _optional_boundary_id = function (key::String)
+        !haskey(raw, key) && return nothing
+        value = raw[key]
+        value === nothing && return nothing
+        value isa AbstractString ||
+            throw(ArgumentError("flexibility.$(key) must be a string or null."))
+        result = String(value)
+        isempty(strip(result)) && return nothing
+        return result
+    end
+
     if requirement_source == FLEXIBILITY_REQUIREMENT_AGC_SCHEDULE
-        haskey(raw, "targetPoiPowerKw") || throw(
+        target_poi_power_boundary_id = _optional_boundary_id("targetPoiPowerBoundaryId")
+        target_poi_power_boundary_id === nothing && throw(
             ArgumentError(
-                "flexibility.targetPoiPowerKw is required for agc_or_schedule.",
+                "flexibility.targetPoiPowerBoundaryId is required for agc_or_schedule " *
+                "(boundary series from Jan 1, sliced by simulation dates).",
             ),
         )
-        target_poi_power_kw = _normalize_flexibility_value_spec(
-            raw["targetPoiPowerKw"],
-            "targetPoiPowerKw";
-            nonnegative=false,
-        )
     elseif requirement_source == FLEXIBILITY_REQUIREMENT_USER_DEFINED
-        for field in ("upwardRequirementKw", "downwardRequirementKw")
-            haskey(raw, field) || throw(
-                ArgumentError(
-                    "flexibility.$(field) is required for user_defined.",
-                ),
+        upward_requirement_boundary_id = _optional_boundary_id("upwardRequirementBoundaryId")
+        downward_requirement_boundary_id = _optional_boundary_id("downwardRequirementBoundaryId")
+        has_up_boundary = upward_requirement_boundary_id !== nothing
+        has_down_boundary = downward_requirement_boundary_id !== nothing
+        has_up_value = haskey(raw, "upwardRequirementKw")
+        has_down_value = haskey(raw, "downwardRequirementKw")
+        (has_up_boundary || has_up_value) || throw(
+            ArgumentError(
+                "flexibility.upwardRequirementBoundaryId or upwardRequirementKw " *
+                "is required for user_defined.",
+            ),
+        )
+        (has_down_boundary || has_down_value) || throw(
+            ArgumentError(
+                "flexibility.downwardRequirementBoundaryId or downwardRequirementKw " *
+                "is required for user_defined.",
+            ),
+        )
+        if !has_up_boundary
+            upward_requirement_kw = _normalize_flexibility_value_spec(
+                raw["upwardRequirementKw"],
+                "upwardRequirementKw";
+                nonnegative=true,
             )
         end
-        upward_requirement_kw = _normalize_flexibility_value_spec(
-            raw["upwardRequirementKw"],
-            "upwardRequirementKw";
-            nonnegative=true,
-        )
-        downward_requirement_kw = _normalize_flexibility_value_spec(
-            raw["downwardRequirementKw"],
-            "downwardRequirementKw";
-            nonnegative=true,
-        )
+        if !has_down_boundary
+            downward_requirement_kw = _normalize_flexibility_value_spec(
+                raw["downwardRequirementKw"],
+                "downwardRequirementKw";
+                nonnegative=true,
+            )
+        end
     end
 
     return FlexibilityEvaluationConfig(
@@ -187,8 +219,12 @@ function normalize_flexibility_evaluation_config(
         target_poi_power_kw,
         upward_requirement_kw,
         downward_requirement_kw,
+        target_poi_power_boundary_id,
+        upward_requirement_boundary_id,
+        downward_requirement_boundary_id,
     )
 end
+
 
 function flexibility_evaluation_config_dict(config::FlexibilityEvaluationConfig)
     row = StringAnyDict(
@@ -202,10 +238,18 @@ function flexibility_evaluation_config_dict(config::FlexibilityEvaluationConfig)
         "requirementSource" => config.requirement_source,
     )
     if config.requirement_source == FLEXIBILITY_REQUIREMENT_AGC_SCHEDULE
-        row["targetPoiPowerKw"] = config.target_poi_power_kw
+        row["targetPoiPowerBoundaryId"] = config.target_poi_power_boundary_id
     elseif config.requirement_source == FLEXIBILITY_REQUIREMENT_USER_DEFINED
-        row["upwardRequirementKw"] = config.upward_requirement_kw
-        row["downwardRequirementKw"] = config.downward_requirement_kw
+        if config.upward_requirement_boundary_id !== nothing
+            row["upwardRequirementBoundaryId"] = config.upward_requirement_boundary_id
+        else
+            row["upwardRequirementKw"] = config.upward_requirement_kw
+        end
+        if config.downward_requirement_boundary_id !== nothing
+            row["downwardRequirementBoundaryId"] = config.downward_requirement_boundary_id
+        else
+            row["downwardRequirementKw"] = config.downward_requirement_kw
+        end
     end
     return row
 end
@@ -238,6 +282,68 @@ function _resolve_flexibility_value_spec(value_spec, timestamp::String, field_na
         )
     end
     return Float64(value)
+end
+
+# ---------------------------------------------------------------------------
+# 边界引用：seed 后从任务时序库按截取结果取值（日期语义与风速/负荷一致）
+# ---------------------------------------------------------------------------
+
+"""灵活性需求引用的边界 ID 列表（用于 seed 并入画布边界）。"""
+function flexibility_boundary_ids(config::FlexibilityEvaluationConfig)::Vector{String}
+    ids = String[]
+    for value in (
+        config.target_poi_power_boundary_id,
+        config.upward_requirement_boundary_id,
+        config.downward_requirement_boundary_id,
+    )
+        value === nothing && continue
+        isempty(strip(String(value))) && continue
+        push!(ids, String(value))
+    end
+    return unique(ids)
+end
+
+"""从任务时序库读取已按日期截取的边界需求值。"""
+function _read_flexibility_boundary_value(
+    db_path::String,
+    boundary_id::String,
+    meaning::String,
+    layer_id::String,
+    timestamp::String,
+    field_name::String,
+)
+    data_key = boundary_id * "|" * meaning * "|planned#" * layer_id
+    value = get_ts_exact(db_path, data_key, timestamp)
+    value === nothing && (value = get_ts_floor(db_path, data_key, timestamp))
+    value === nothing && error(
+        "Flexibility boundary " * field_name * "=" * boundary_id *
+        " has no value for timestamp=" * timestamp *
+        " (meaning=" * meaning * ", layer=" * layer_id * "). " *
+        "Ensure the boundary covers the simulation date range.",
+    )
+    return Float64(value)
+end
+
+function _flexibility_requirement_value(
+    config::FlexibilityEvaluationConfig,
+    db_path::String,
+    timestamp::String;
+    boundary_id::Union{Nothing,String},
+    meaning::String,
+    value_spec,
+    field_name::String,
+)
+    if boundary_id !== nothing && !isempty(strip(String(boundary_id)))
+        return _read_flexibility_boundary_value(
+            db_path,
+            String(boundary_id),
+            meaning,
+            config.layer_id,
+            timestamp,
+            field_name,
+        )
+    end
+    return _resolve_flexibility_value_spec(value_spec, timestamp, field_name)
 end
 
 function _read_exact_flexibility_baseline_value(
@@ -463,27 +569,42 @@ function _build_system_flexibility_requirement_input(
             poi_id;
             value_reader=value_reader,
         )
+        target_kw = _flexibility_requirement_value(
+            config,
+            db_path,
+            next_timestamp;
+            boundary_id=config.target_poi_power_boundary_id,
+            meaning="power",
+            value_spec=config.target_poi_power_kw,
+            field_name="targetPoiPowerKw",
+        )
         return AgcScheduleRequirementInput(
             baseline_poi_power_kw=grid_context.operating_point["poi_power_kw"],
-            target_poi_power_kw=_resolve_flexibility_value_spec(
-                config.target_poi_power_kw,
-                next_timestamp,
-                "targetPoiPowerKw",
-            ),
+            target_poi_power_kw=target_kw,
         )
     end
 
+    upward_kw = _flexibility_requirement_value(
+        config,
+        db_path,
+        timestamp;
+        boundary_id=config.upward_requirement_boundary_id,
+        meaning="flex_up",
+        value_spec=config.upward_requirement_kw,
+        field_name="upwardRequirementKw",
+    )
+    downward_kw = _flexibility_requirement_value(
+        config,
+        db_path,
+        timestamp;
+        boundary_id=config.downward_requirement_boundary_id,
+        meaning="flex_down",
+        value_spec=config.downward_requirement_kw,
+        field_name="downwardRequirementKw",
+    )
     return UserDefinedRequirementInput(
-        upward_requirement_kw=_resolve_flexibility_value_spec(
-            config.upward_requirement_kw,
-            timestamp,
-            "upwardRequirementKw",
-        ),
-        downward_requirement_kw=_resolve_flexibility_value_spec(
-            config.downward_requirement_kw,
-            timestamp,
-            "downwardRequirementKw",
-        ),
+        upward_requirement_kw=upward_kw,
+        downward_requirement_kw=downward_kw,
     )
 end
 

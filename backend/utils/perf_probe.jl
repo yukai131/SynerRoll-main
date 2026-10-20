@@ -77,11 +77,24 @@ function perf_measure(f::Function, kind::String, id::String, phase::String; meta
     end
 end
 
+"""从任意深度的 db 路径解析 (kind, id)：capacity-planning/<id>/... 或 tasks/<id>/..."""
+function perf_owner_from_db_path(db_path::String)
+    parts = split(normpath(abspath(db_path)), Base.Filesystem.path_separator)
+    for i in eachindex(parts)
+        if parts[i] == "capacity-planning" && i < length(parts)
+            return ("planning", String(parts[i + 1]))
+        elseif parts[i] == "tasks" && i < length(parts)
+            return ("task", String(parts[i + 1]))
+        end
+    end
+    folder = dirname(db_path)
+    return ("task", basename(folder))
+end
+
 function perf_measure_db(f::Function, db_path::String, phase::String; meta=Dict{String,Any}())
     PERF_ENABLED || return f()
-    folder = dirname(db_path)
-    kind = basename(dirname(folder)) == "capacity-planning" ? "planning" : "task"
-    return perf_measure(f, kind, basename(folder), phase; meta)
+    kind, id = perf_owner_from_db_path(db_path)
+    return perf_measure(f, kind, id, phase; meta)
 end
 
 function perf_finish(kind::String, id::String)

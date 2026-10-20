@@ -26,6 +26,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: Record<string, number>]
+  'update:boundaryId': [boundaryId: string]
   validation: [message: string]
 }>()
 
@@ -97,7 +98,13 @@ const normalizedEntries = (
     }
     result[timestamp] = numericValue
   }
-  if (!Object.prototype.hasOwnProperty.call(result, 'default') && props.expectedTimestamps?.length) {
+  // 边界模式：曲线从 1/1 起连续存储，仿真日期由 seed 自动截取，
+  // 不必用评价时刻 H:MM 做齐全性校验。
+  if (
+    props.mode !== 'boundary' &&
+    !Object.prototype.hasOwnProperty.call(result, 'default') &&
+    props.expectedTimestamps?.length
+  ) {
     const missing = props.expectedTimestamps.filter(timestamp =>
       !Object.prototype.hasOwnProperty.call(result, timestamp)
     )
@@ -248,13 +255,17 @@ const applyBoundarySeries = () => {
 }
 
 watch(selectedBoundary, () => {
-  if (props.mode === 'boundary') applyBoundarySeries()
+  if (props.mode !== 'boundary') return
+  const boundaryId = selectedBoundary.value.split(':')[0] ?? ''
+  emit('update:boundaryId', boundaryId)
+  applyBoundarySeries()
 })
 
 watch(() => props.mode, (mode) => {
   if (mode === 'manual') validateManualRows()
   else if (mode === 'file') setValidation(fileLoaded.value ? validationMessage.value : '请选择并导入一个时序文件')
   else if (mode === 'boundary') applyBoundarySeries()
+  else emit('update:boundaryId', '')
 }, { immediate: true })
 
 watch(() => props.expectedTimestamps, () => {
@@ -321,7 +332,7 @@ const previewRows = computed(() =>
       <label class="space-y-1 text-xs text-app-muted">
         <span>项目边界数据库曲线</span>
         <select v-model="selectedBoundary" class="field-input h-8 text-xs" :disabled="!boundaryOptions?.length">
-          <option value="">{{ boundaryOptions?.length ? '请选择计划/AGC曲线' : '当前时层没有可用功率曲线' }}</option>
+          <option value="">{{ boundaryOptions?.length ? '请选择边界曲线' : '当前时层没有可用边界曲线' }}</option>
           <option v-for="option in boundaryOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
       </label>

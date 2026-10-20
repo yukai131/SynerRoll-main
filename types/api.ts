@@ -22,6 +22,10 @@ export interface CreateProjectRequest {
   template?: 'blank' | 'demo'
 }
 
+export interface CopyProjectRequest {
+  name?: string
+}
+
 export interface UpdateProjectRequest {
   name?: string
   description?: string
@@ -119,10 +123,6 @@ export interface TaskDataRow {
 export interface TaskDataResponse {
   label: string
   rows: TaskDataRow[]
-  cursor?: number
-  latestCursor?: number
-  hasMore?: boolean
-  probe?: Record<string, number | string | boolean>
 }
 
 export interface TaskTraceStep {
@@ -198,6 +198,10 @@ export interface EconomyMetrics {
   dailyAvgObjective: number
   annualEstimateObjective: number
   byCostType: Record<string, EconomyCostTypeMetric>
+  /** 参与总览平均的有效时层数（空层不计入） */
+  layerCount?: number
+  /** 跨层聚合方式，当前固定 mean */
+  aggregation?: string
   note?: string
 }
 
@@ -220,11 +224,6 @@ export interface EconomyEvaluationResult {
 // ───── 灵活性评估 ─────
 export interface FlexibilityPeriodResult {
   timestamp: string
-  next_timestamp: string
-  time_step: string
-  requirement: number
-  reference_power?: number | null
-  target_power?: number | null
   timestamp_minutes?: number
   direction: 'up' | 'down'
   requirement_source?: string
@@ -258,8 +257,5 @@ export interface TaskFlexibilityResponse {
   config?: FlexibilityTaskConfig | { enabled: boolean }
   periods: FlexibilityPeriodResult[]
   summaries: FlexibilitySummaryResult[]
-  revision?: number
-  versioned?: boolean
-  reset?: boolean
   probe?: Record<string, number | string | boolean>
 }

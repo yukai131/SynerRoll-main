@@ -53,6 +53,8 @@ const COST_LABELS = Dict{String,String}(
     "cut_cost"         => "弃风/弃光成本",
     "purchase_cost"    => "购电成本",
     "sell_revenue"     => "售电收益",
+    "hydrogen_purchase_cost" => "购氢成本",
+    "hydrogen_sell_revenue"  => "售氢收益",
     "shortage_penalty" => "短缺惩罚",
     "excess_penalty"   => "过剩惩罚",
 )
@@ -69,6 +71,8 @@ const COST_FORMULAS = Dict{String,String}(
     "cut_cost"         => "Σ(弃风/弃光功率 × 成本率 × Δt)",
     "purchase_cost"    => "Σ(购电功率 × 购电价 × Δt)",
     "sell_revenue"     => "-Σ(售电功率 × 售电价 × Δt)",
+    "hydrogen_purchase_cost" => "Σ(购氢流量 × 购氢价 × Δt)",
+    "hydrogen_sell_revenue"  => "-Σ(售氢流量 × 售氢价 × Δt)",
     "shortage_penalty" => "Σ(短缺量 × 松弛惩罚系数)",
     "excess_penalty"   => "Σ(过剩量 × 松弛惩罚系数)",
 )
@@ -399,6 +403,39 @@ function calc_grid_sell_revenue(sell_power::Vector{Float64}, sell_price::Float64
     return -sum(sell_power) * sell_price
 end
 
+# ─── 氢网 (HGRID) 成本计算 ──────────────────────────────────────────────────
+
+"""
+    calc_hgrid_costs(...)
+
+  - hydrogen_purchase_cost：Σ(购氢 × 买价)，正成本
+  - hydrogen_sell_revenue：-Σ(售氢 × 卖价)，负成本（收益）
+"""
+function calc_hgrid_costs(
+    component_id::String, component_name::String,
+    sell_power::Vector{Float64}, buy_power::Vector{Float64},
+    params, layer_id::String,
+)
+    items = CostItem[]
+    exchange_on = objective_enabled(params, "exchange_objective_on")
+
+    purchase_val = calc_fuel_cost(buy_power, params.buy_price)
+    push!(items, CostItem(
+        component_id, "HGRID", component_name, "hydrogen_purchase_cost", cost_label("hydrogen_purchase_cost"),
+        layer_id, purchase_val, exchange_on, false, false;
+        formula=cost_formula("hydrogen_purchase_cost"), objective_flag="exchange_objective_on",
+    ))
+
+    sell_val = -calc_fuel_cost(sell_power, params.sell_price)
+    push!(items, CostItem(
+        component_id, "HGRID", component_name, "hydrogen_sell_revenue", cost_label("hydrogen_sell_revenue"),
+        layer_id, sell_val, exchange_on, false, true;
+        formula=cost_formula("hydrogen_sell_revenue"), objective_flag="exchange_objective_on",
+    ))
+
+    return items
+end
+
 # ─── 松弛变量成本 ────────────────────────────────────────────────────────────
 
 """
@@ -409,11 +446,11 @@ end
 function calc_slack_penalty(
     bus_id::String, bus_name::String,
     shortage::Vector{Float64}, excess::Vector{Float64},
-    penalty_rate::Float64, layer_id::String,
+    shortage_penalty_rate::Float64, excess_penalty_rate::Float64, layer_id::String,
 )
     items = CostItem[]
 
-    shortage_val = sum(shortage) * penalty_rate
+    shortage_val = sum(shortage) * shortage_penalty_rate
     if shortage_val > 0.0
         push!(items, CostItem(
             bus_id, "BUS", bus_name, "shortage_penalty", cost_label("shortage_penalty"),
@@ -422,7 +459,7 @@ function calc_slack_penalty(
         ))
     end
 
-    excess_val = sum(excess) * penalty_rate
+    excess_val = sum(excess) * excess_penalty_rate
     if excess_val > 0.0
         push!(items, CostItem(
             bus_id, "BUS", bus_name, "excess_penalty", cost_label("excess_penalty"),
@@ -475,6 +512,12 @@ function calc_component_cost(
         )
     elseif comp_type == "GRID"
         return calc_grid_costs(
+            component_id, component_name,
+            get(power_data, "sell", Float64[]), get(power_data, "buy", Float64[]),
+            params, layer_id,
+        )
+    elseif comp_type == "HGRID"
+        return calc_hgrid_costs(
             component_id, component_name,
             get(power_data, "sell", Float64[]), get(power_data, "buy", Float64[]),
             params, layer_id,

@@ -821,8 +821,12 @@ const BOUNDARY_MEANING_LABELS = Dict(
     "temperature" => "温度",
     "factor" => "转化因子",
     "power" => "输出功率",
-    "price" => "价格",
     "load" => "负荷",
+    "buy_price" => "购电价格",
+    "sell_price" => "售电价格",
+    "fuel_price" => "燃料价格",
+    "flex_up" => "上调灵活性",
+    "flex_down" => "下调灵活性",
 )
 
 _meaning_label(meaning::AbstractString) =

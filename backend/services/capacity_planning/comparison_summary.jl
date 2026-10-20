@@ -6,17 +6,14 @@
 const COMPARISON_METRICS = (
     ("fitness",                "适应度",          "asc",  "fitness = objectiveFitness + constraintPenalty（C-404）"),
     ("objectiveFitness",       "目标项",          "asc",  "breakdown.objectiveFitness（七类目标独立入口 _objective_fitness）"),
-    ("constraintPenalty",      "约束惩罚",        "asc",  "breakdown.constraintPenalty（targetIrrPercent 差额 × CAPEX，近似待 K-306）"),
+    ("constraintPenalty",      "约束惩罚",        "asc",  "breakdown.constraintPenalty（targetIrr 差额×CAPEX + 技术约束软惩罚 technicalPenalty×偏差百分点）"),
     ("operatingCostYuan",      "年运行成本(万元)", "asc",  "breakdown.weightedOperatingCost ÷ 1e4（Σ 场景运行成本 × weightDays 的年加权值）"),
     ("investmentYuan",         "初始投资(万元)",  "asc",  "(lifecycleCapexWan + lifecycleConstructionVatWan)（万元），口径同 initial-investment-min"),
     ("npvYuan",                "NPV(万元)",       "desc", "breakdown.indicators.npv ÷ 1e4（C-403 全投资税后口径）"),
     ("irr",                    "IRR(%)",          "desc", "breakdown.indicators.irr（C-403 全投资税后口径）"),
-    ("lcoe",                   "LCOE(元/kWh)",    "asc",  "breakdown.indicators.lcoe（C-403 全投资折现口径）"),
+    ("lcoe",                   "LCOE(元/kWh)",    "asc",  "breakdown.indicators.lcoe（C-403 全投资折现口径，分母=上网电量）"),
     ("paybackYears",           "回收期(年)",      "asc",  "breakdown.lifecyclePaybackYears（税后简单回收期）"),
     ("discountedPaybackYears", "折现回收期(年)",  "asc",  "breakdown.lifecycleDiscountedPaybackYears"),
-    ("carbonTons",             "碳排放(吨/年)",   "asc",  "未接线：待 F 线仿真后验碳指标"),
-    ("reliability",            "可靠性(%)",       "desc", "未接线：待 F 线仿真后验可靠性指标"),
-    ("flexibility",            "灵活性",          "desc", "未接线：待 F 线灵活性指标"),
 )
 
 function _comparison_number(value)
@@ -50,8 +47,6 @@ function _comparison_metric_value(breakdown::AbstractDict, key::String)
         return _comparison_number(get(breakdown, "lifecyclePaybackYears", nothing))
     elseif key == "discountedPaybackYears"
         return _comparison_number(get(breakdown, "lifecycleDiscountedPaybackYears", nothing))
-    elseif key in ("carbonTons", "reliability", "flexibility")
-        return nothing
     else
         return _comparison_number(get(breakdown, key, nothing))
     end
@@ -61,8 +56,7 @@ end
     build_planning_comparison(planning_id::String) -> Dict{String,Any}
 
 C-405 方案比较汇总：
-- 统一九类指标（容量/投资/运行成本/NPV/LCOE/IRR/碳/可靠性/灵活性），
-  碳/可靠性/灵活性为未接线占位（待 F 线后验指标），其余全部来自候选 breakdown；
+- 统一指标（适应度/目标/惩罚/运行成本/投资/NPV/LCOE/IRR/回收期），全部来自候选 breakdown；
 - 基准差异：可行候选以排名第 1 者（同 bestEvaluationId 口径）为基准，逐项做差；
 - 输入版本：项目快照 hash、场景集 hash、评价器版本随响应下发；
 - 排名规则可解释：fitness 升序（同值按评价次序），不可行候选不隐藏、排在最后并带失败原因；

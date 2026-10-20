@@ -6,7 +6,7 @@
 #   - 理解模型的数学原理
 #
 # 数学关系：
-#   H_ET[t] = E_ET[t] × η    （产氢量 = 耗电量 × 效率）
+#   H_ET[t] = E_ET[t] / η    （产氢量 kg/h = 耗电量 kW / 单位产氢能耗 kWh/kg）
 #
 # 共享函数（resolve_electrolyzer_params）见 model-common.jl
 # 对应的元编程追踪版本见 model.jl
@@ -22,7 +22,7 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
 
     @variable(model, E_ET[t in time_index], lower_bound = 0.0, upper_bound = params.capacity)
     @variable(model, H_ET[t in time_index])
-    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
 
     if params.ramp_constraint_on
         define_et_ramp_constraints!(model, time_index, E_ET, params.ramp_ratio, params.capacity)
@@ -54,7 +54,7 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
 
     @variable(model, E_ET[t in time_index], lower_bound = 0.0, upper_bound = params.capacity)
     @variable(model, H_ET[t in time_index])
-    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
 
     if params.ramp_constraint_on
         define_et_ramp_constraints!(model, time_index, E_ET, params.ramp_ratio, params.capacity)
@@ -82,7 +82,7 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
 
     @variable(model, E_ET[t in time_index], lower_bound = 0.0, upper_bound = params.capacity)
     @variable(model, H_ET[t in time_index])
-    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
 
     if params.ramp_constraint_on
         define_et_ramp_constraints!(model, time_index, E_ET, params.ramp_ratio, params.capacity)
@@ -118,7 +118,7 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
 
     @variable(model, E_ET[t in time_index], lower_bound = planned_output[t], upper_bound = planned_output[t] + 1.0)
     @variable(model, H_ET[t in time_index])
-    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+    @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
 
     on_off_objective_expr = @expression(model, 0.0)
     if params.on_off_constraint_on

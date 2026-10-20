@@ -1,14 +1,12 @@
-# ═══════════════════════════════════════════════════════════════════════════
 # wind_turbine/model-common.jl — 共享函数
 #
 # model-base.jl 和 model.jl 共用的参数解析与辅助函数
-# ═══════════════════════════════════════════════════════════════════════════
 
 function resolve_wind_turbine_params(component::WindTurbine, ctx::BuildContext)
     layer_settings = layer_config(component, ctx.layer["id"])
     paras = component_paras(component)
     time_step_hours = step_hours(ctx.layer)
-    ramp_rate_kw_per_hour = paras["ramp"] * paras["capacity"]
+    ramp_rate_kw_per_hour = ramp_per_min_to_per_hour(paras["ramp"]) * paras["capacity"]
 
     return (
         layer_settings=layer_settings,
@@ -32,8 +30,9 @@ end
 遍历 component 的 boundaryIds，从任务时序库中查询边界数据，
 按 boundary 的物理意义（factor / wind_speed / power）转换为可用功率。
 
-若组件关联了机型拟合曲线（paras["fitting"]），则完全覆盖默认公式：
-拟合曲线是整场风速-功率关系，已含高度换算与效率，不再重复缩放。
+若组件关联了机型拟合曲线（paras["fitting"]），则覆盖默认公式：
+拟合曲线给出「测试样本量级」的整场风速–功率形状（已含高度换算与效率），
+再按装机容量缩放：P = P_fit × capacity / p_rated，并钳位到 [0, capacity]。
 """
 function generate_wind_turbine_max_power(component::WindTurbine, ctx::BuildContext)
     boundary_ids = component_boundary_ids(component)
@@ -44,6 +43,7 @@ function generate_wind_turbine_max_power(component::WindTurbine, ctx::BuildConte
     use_fitting = fitting isa AbstractDict && string(get(fitting, "type", "")) == "wind"
 
     if use_fitting
+        fitting_params = get(fitting, "params", Dict{String,Any}())
         for boundary_id in boundary_ids
             data, label = resolve_prediction_series(
                 ctx;
@@ -51,7 +51,12 @@ function generate_wind_turbine_max_power(component::WindTurbine, ctx::BuildConte
                 algorithm_key="windTurbinePrediction",
             )
             if parse_ts_label(label)["var_name"] == "wind_speed"
-                return evaluate_wind_fitting_curve(data, get(fitting, "params", Dict{String,Any}()))
+                raw_power = evaluate_wind_fitting_curve(data, fitting_params)
+                return scale_fitting_power_to_capacity(
+                    raw_power,
+                    paras["capacity"],
+                    wind_fitting_reference_power(fitting_params),
+                )
             end
         end
         error("Wind fitting requires a wind_speed boundary — checked: $(boundary_ids)")

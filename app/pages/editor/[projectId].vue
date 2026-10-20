@@ -25,7 +25,7 @@ import {
   resetPasteCount,
   updateNodeFromFields
 } from '~~/utils/canvas'
-import { syncBoundaryStateFromNodes } from '~~/utils/boundary-sync'
+import { reconcileBoundaryBindings, syncBoundaryStateFromNodes } from '~~/utils/boundary-sync'
 import { syncFittingModelsFromWorkspace, syncWorkspaceFromFittingModels } from '~~/utils/fitting-sync'
 import { downloadJson } from '~~/utils/download'
 
@@ -117,6 +117,12 @@ watchEffect(() => {
   }
 
   const loaded = data.value.project
+  // 边界.relatedComponents ↔ 节点.boundaryIds 双向校准（取并集，避免单侧清空后另一侧被覆盖）
+  if (loaded.workspace && loaded.boundaries) {
+    const reconciled = reconcileBoundaryBindings(loaded.workspace, loaded.boundaries)
+    loaded.workspace = reconciled.workspace
+    loaded.boundaries = reconciled.boundaries
+  }
   // 机型 relatedComponents → 节点.fittingModelId 双向对齐
   if (loaded.fittingModels?.length) {
     loaded.workspace = syncWorkspaceFromFittingModels(loaded.workspace, loaded.fittingModels)
@@ -1000,7 +1006,7 @@ onBeforeUnmount(() => {
     <!-- 算法配置弹窗 -->
     <AlgorithmConfigModal
       :open="showAlgorithmConfigModal"
-      :algorithm="project?.algorithm ?? { electricityLoadPrediction: 'None', windTurbinePrediction: 'None', optimizationAlgorithm: 'MILP', solver: 'COPT', slackEnabled: false, slackPenalty: 1000000 }"
+      :algorithm="project?.algorithm ?? { electricityLoadPrediction: 'None', windTurbinePrediction: 'None', optimizationAlgorithm: 'MILP', solver: 'COPT', slackEnabled: false, shortagePenalty: 1000, excessPenalty: 50 }"
       @close="showAlgorithmConfigModal = false"
       @confirm="handleAlgorithmConfigConfirm"
     />

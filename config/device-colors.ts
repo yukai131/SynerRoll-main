@@ -20,6 +20,7 @@ export const DEVICE_COLOR_BY_TYPE: Readonly<Record<string, string>> = Object.fre
   HLOAD: '#10B981',
   QLOAD: '#FB923C',
   GRID: '#8B5CF6',
+  HGRID: '#2DD4BF',
   HYDRO: '#2563EB',
   BUS: '#64748B',
   SHORTAGE: '#DC2626',
@@ -37,7 +38,9 @@ export const ENERGY_FLOW_COLOR_BY_ROLE: Readonly<Record<string, string>> = Objec
   CS_CHARGE: '#0D9488',
   CS_DISCHARGE: '#06B6D4',
   GRID_PURCHASE: '#8B5CF6',
-  GRID_SALE: '#1D4ED8'
+  GRID_SALE: '#1D4ED8',
+  HGRID_PURCHASE: '#14B8A6',
+  HGRID_SALE: '#0F766E'
 })
 
 const DEVICE_TYPE_KEYS = Object.keys(DEVICE_COLOR_BY_TYPE)
@@ -98,6 +101,8 @@ export function getEnergyFlowColor(varName: string): string {
   const normalized = String(varName).trim().toUpperCase()
   if (/^E_GRID_IN(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.GRID_SALE!
   if (/^E_GRID_OUT(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.GRID_PURCHASE!
+  if (/^H_HGRID_IN(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HGRID_SALE!
+  if (/^H_HGRID_OUT(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HGRID_PURCHASE!
 
   const storageMatch = normalized.match(/^E_(ES|PS|FS|CS)_(IN|OUT)(?:_|$)/)
   if (storageMatch) {

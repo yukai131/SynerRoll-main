@@ -13,8 +13,8 @@ function resolve_electricity_storage_params(component::ElectricityStorage, ctx::
         status=layer_settings["status"],
         capacity=component_paras(component)["capacity"],
         efficiency=component_paras(component)["η"],
-        # ramp 是充放电倍率（1/h）：倍率 × 能量容量 = 功率上限，不应再乘时段长度。
-        ramp_ratio=component_paras(component)["ramp"],
+        # ramp 前端为 %/min，此处已换算为 1/h 充放电倍率：倍率 × 能量容量 = 功率上限，不再乘时段长度。
+        ramp_ratio=ramp_per_min_to_per_hour(component_paras(component)["ramp"]),
         # 功率（kW）转换为单时段电量（kWh）时使用。
         time_step_hours=time_step_hours,
         min_soc=component_paras(component)["min"],

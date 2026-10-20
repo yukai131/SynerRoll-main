@@ -75,7 +75,8 @@
           "defaultValue": 0.95,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "predict_algorithm",
@@ -148,7 +149,8 @@
           "defaultValue": 0.96,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "η_g",
@@ -157,7 +159,8 @@
           "defaultValue": 0.93,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "η_inverter",
@@ -232,7 +235,8 @@
           "type": "number",
           "defaultValue": 0.01,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -269,7 +273,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [],
@@ -376,7 +381,8 @@
           "defaultValue": 0.95,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "predict_algorithm",
@@ -458,7 +464,8 @@
           "type": "number",
           "defaultValue": 0.01,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -495,7 +502,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [],
@@ -539,7 +547,7 @@
         "火电"
       ],
       "boundaryKey": [
-        "price"
+        "fuel_price"
       ],
       "ports": [
         {
@@ -608,7 +616,8 @@
           "defaultValue": 0.5,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -627,7 +636,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "T_min_on",
@@ -669,7 +679,7 @@
           "key": "fuel_price",
           "label": "燃料价格",
           "type": "number",
-          "defaultValue": 0.2,
+          "defaultValue": 0.15,
           "unit": "元/kWh",
           "step": 0.01,
           "min": 0.0
@@ -720,7 +730,8 @@
           "type": "number",
           "defaultValue": 0.03,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -757,7 +768,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -834,7 +846,7 @@
         "火电"
       ],
       "boundaryKey": [
-        "price"
+        "fuel_price"
       ],
       "ports": [
         {
@@ -903,7 +915,8 @@
           "defaultValue": 0.55,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -922,7 +935,8 @@
           "defaultValue": 0.2,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "T_min_on",
@@ -964,7 +978,7 @@
           "key": "fuel_price",
           "label": "燃料价格",
           "type": "number",
-          "defaultValue": 0.2,
+          "defaultValue": 0.3,
           "unit": "元/kWh",
           "step": 0.01,
           "min": 0.0
@@ -1015,7 +1029,8 @@
           "type": "number",
           "defaultValue": 0.025,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -1052,7 +1067,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -1130,7 +1146,7 @@
         "热电联产"
       ],
       "boundaryKey": [
-        "price"
+        "fuel_price"
       ],
       "ports": [
         {
@@ -1207,7 +1223,8 @@
           "defaultValue": 0.4,
           "step": 0.01,
           "min": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "β",
@@ -1235,7 +1252,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "T_min_on",
@@ -1277,7 +1295,7 @@
           "key": "fuel_price",
           "label": "燃料价格",
           "type": "number",
-          "defaultValue": 0.2,
+          "defaultValue": 0.3,
           "unit": "元/kWh",
           "step": 0.01,
           "min": 0.0
@@ -1328,7 +1346,8 @@
           "type": "number",
           "defaultValue": 0.03,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -1365,7 +1384,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -1512,7 +1532,8 @@
           "defaultValue": 0.95,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -1531,7 +1552,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "min",
@@ -1540,7 +1562,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ini",
@@ -1549,7 +1572,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "loss",
@@ -1576,7 +1600,7 @@
           "label": "初始投资",
           "type": "number",
           "defaultValue": 1500.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -1584,7 +1608,7 @@
           "label": "更换成本",
           "type": "number",
           "defaultValue": 1500.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -1592,7 +1616,7 @@
           "label": "材料成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -1600,7 +1624,7 @@
           "label": "其他制造成本",
           "type": "number",
           "defaultValue": 10.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -1608,7 +1632,7 @@
           "label": "其他管理成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -1617,7 +1641,8 @@
           "type": "number",
           "defaultValue": 0.01,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -1654,7 +1679,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -1789,7 +1815,8 @@
           "defaultValue": 0.95,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -1808,7 +1835,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "min",
@@ -1817,7 +1845,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ini",
@@ -1826,7 +1855,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "loss",
@@ -1894,7 +1924,8 @@
           "type": "number",
           "defaultValue": 0.01,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -1931,7 +1962,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -2068,7 +2100,8 @@
           "defaultValue": 0.88,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -2087,7 +2120,8 @@
           "defaultValue": 0.95,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "min",
@@ -2096,7 +2130,8 @@
           "defaultValue": 0.15,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ini",
@@ -2105,7 +2140,8 @@
           "defaultValue": 0.5,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "loss",
@@ -2132,7 +2168,7 @@
           "label": "初始投资",
           "type": "number",
           "defaultValue": 3500.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -2140,7 +2176,7 @@
           "label": "更换成本",
           "type": "number",
           "defaultValue": 2500.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -2148,7 +2184,7 @@
           "label": "材料成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2156,7 +2192,7 @@
           "label": "其他制造成本",
           "type": "number",
           "defaultValue": 30.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2164,7 +2200,7 @@
           "label": "其他管理成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2173,7 +2209,8 @@
           "type": "number",
           "defaultValue": 0.008,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -2210,7 +2247,8 @@
           "defaultValue": 0.5,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -2384,7 +2422,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "min",
@@ -2393,7 +2432,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ini",
@@ -2402,7 +2442,8 @@
           "defaultValue": 0.5,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "loss",
@@ -2479,7 +2520,8 @@
           "type": "number",
           "defaultValue": 0.015,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -2516,7 +2558,8 @@
           "defaultValue": 0.2,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -2653,7 +2696,8 @@
           "defaultValue": 0.7,
           "step": 0.01,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ramp",
@@ -2672,7 +2716,8 @@
           "defaultValue": 0.95,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "min",
@@ -2681,7 +2726,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "ini",
@@ -2690,7 +2736,8 @@
           "defaultValue": 0.5,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "loss",
@@ -2717,7 +2764,7 @@
           "label": "初始投资",
           "type": "number",
           "defaultValue": 1500.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -2725,7 +2772,7 @@
           "label": "更换成本",
           "type": "number",
           "defaultValue": 1200.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 100.0
         },
         {
@@ -2733,7 +2780,7 @@
           "label": "材料成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2741,7 +2788,7 @@
           "label": "其他制造成本",
           "type": "number",
           "defaultValue": 15.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2749,7 +2796,7 @@
           "label": "其他管理成本",
           "type": "number",
           "defaultValue": 0.0,
-          "unit": "元/kW",
+          "unit": "元/kWh",
           "step": 1.0
         },
         {
@@ -2758,7 +2805,8 @@
           "type": "number",
           "defaultValue": 0.012,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -2795,7 +2843,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -2930,12 +2979,12 @@
         },
         {
           "key": "η",
-          "label": "制氢效率",
+          "label": "单位产氢能耗",
           "type": "number",
-          "defaultValue": 0.7,
-          "step": 0.01,
-          "min": 0.0,
-          "max": 1.0
+          "defaultValue": 48.0,
+          "step": 1.0,
+          "min": 0.1,
+          "unit": "kWh/kg"
         },
         {
           "key": "ramp",
@@ -2954,7 +3003,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "T_min_on",
@@ -3038,7 +3088,8 @@
           "type": "number",
           "defaultValue": 0.03,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -3075,7 +3126,8 @@
           "defaultValue": 0.3,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "layerEconomicFields": [
@@ -3133,6 +3185,10 @@
           "type": "boolean",
           "defaultValue": false
         }
+      ],
+      "boundaryKey": [
+        "factor",
+        "power"
       ]
     },
     "ELOAD": {
@@ -3277,7 +3333,8 @@
           "type": "number",
           "defaultValue": 0.0,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -3394,7 +3451,8 @@
           "defaultValue": 0.9999,
           "step": 0.0001,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "priority",
@@ -3472,7 +3530,8 @@
           "type": "number",
           "defaultValue": 0.0,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -3658,7 +3717,8 @@
           "type": "number",
           "defaultValue": 0.0,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",
@@ -3715,7 +3775,8 @@
         "外部源"
       ],
       "boundaryKey": [
-        "price"
+        "buy_price",
+        "sell_price"
       ],
       "ports": [
         {
@@ -3775,7 +3836,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0,
-          "max": 1
+          "max": 1,
+          "unit": "-"
         },
         {
           "key": "buy_ratio",
@@ -3784,7 +3846,8 @@
           "defaultValue": 1.0,
           "step": 0.05,
           "min": 0,
-          "max": 1
+          "max": 1,
+          "unit": "-"
         }
       ],
       "commonEconomicFields": [
@@ -3814,6 +3877,130 @@
         {
           "key": "exchange_objective_on",
           "label": "启用购售电成本目标",
+          "type": "boolean",
+          "defaultValue": true
+        }
+      ]
+    },
+    "HGRID": {
+      "backendKey": "HGRID",
+      "label": "氢网",
+      "description": "氢气管网/氢市场接口，用于系统上送（售出）氢气与购入氢气。默认禁止购入、只能卖出。",
+      "category": "hydrogen",
+      "group": "hydrogen-external-source",
+      "tags": [
+        "氢网",
+        "外部源",
+        "氢气交易"
+      ],
+      "boundaryKey": [
+        "h2_buy_price",
+        "h2_sell_price"
+      ],
+      "ports": [
+        {
+          "id": "h2-in",
+          "side": "left",
+          "direction": "in",
+          "medium": "hydrogen",
+          "offset": 40,
+          "label": "上送"
+        },
+        {
+          "id": "h2-out",
+          "side": "right",
+          "direction": "out",
+          "medium": "hydrogen",
+          "offset": 40,
+          "label": "购入"
+        }
+      ],
+      "layerStatuses": {
+        "1": [
+          "stand_alone",
+          "disabled"
+        ],
+        "2": [
+          "stand_alone",
+          "disabled"
+        ],
+        "3": [
+          "stand_alone",
+          "disabled"
+        ],
+        "4": [
+          "stand_alone",
+          "disabled"
+        ],
+        "5": [
+          "stand_alone",
+          "disabled"
+        ]
+      },
+      "commonTechFields": [
+        {
+          "key": "capacity",
+          "label": "接口容量",
+          "type": "number",
+          "defaultValue": 10000.0,
+          "unit": "kg/h",
+          "step": 100.0,
+          "min": 0.0,
+          "required": true,
+          "planning": {
+            "optimizable": true,
+            "defaultLowerFactor": 0.5,
+            "defaultUpperFactor": 2.0
+          }
+        },
+        {
+          "key": "sell_ratio",
+          "label": "上送比例",
+          "type": "number",
+          "defaultValue": 1.0,
+          "step": 0.05,
+          "min": 0.0,
+          "max": 1.0,
+          "unit": "-"
+        },
+        {
+          "key": "buy_ratio",
+          "label": "购入比例",
+          "type": "number",
+          "defaultValue": 0.0,
+          "step": 0.05,
+          "min": 0.0,
+          "max": 1.0,
+          "unit": "-"
+        }
+      ],
+      "commonEconomicFields": [
+        {
+          "key": "sell_price",
+          "label": "售氢价格",
+          "type": "number",
+          "defaultValue": 30.0,
+          "unit": "元/kg",
+          "step": 1.0,
+          "min": 0.0
+        },
+        {
+          "key": "buy_price",
+          "label": "购氢价格",
+          "type": "number",
+          "defaultValue": 35.0,
+          "unit": "元/kg",
+          "step": 1.0,
+          "min": 0.0
+        }
+      ],
+      "layerTechFields": [],
+      "layerEconomicFields": [],
+      "constraintFields": [],
+      "objectiveFields": [
+        {
+          "key": "exchange_objective_on",
+          "label": "启用购售氢成本目标",
           "type": "boolean",
           "defaultValue": true
         }
@@ -3894,7 +4081,8 @@
           "defaultValue": 0.1,
           "step": 0.05,
           "min": 0.0,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         }
       ],
       "commonEconomicFields": [
@@ -3952,7 +4140,8 @@
           "type": "number",
           "defaultValue": 0.015,
           "step": 0.01,
-          "max": 1.0
+          "max": 1.0,
+          "unit": "-"
         },
         {
           "key": "life_year",

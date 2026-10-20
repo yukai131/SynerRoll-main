@@ -14,7 +14,7 @@ export const createEmptyProject = (name: string, description?: string): Project 
     createTime: new Date().toISOString(),
     updateTime: new Date().toISOString(),
     description,
-    owner: 'A4Admin',
+    owner: 'LYDL',
     favorite: false,
     tags: ['综合能源'],
     status: 'draft',
@@ -28,7 +28,8 @@ export const createEmptyProject = (name: string, description?: string): Project 
       optimizationAlgorithm: 'MILP',
       solver: 'HiGHS',
       slackEnabled: false,
-      slackPenalty: 1000000
+      shortagePenalty: 1000,
+      excessPenalty: 50
     },
     solverConfig: {
       tolerance: 0.0001,
@@ -56,8 +57,9 @@ export const normalizeProject = (project: Project): Project => {
       windTurbinePrediction: algorithm.windTurbinePrediction ?? 'None',
       optimizationAlgorithm: algorithm.optimizationAlgorithm ?? 'MILP',
       slackEnabled: algorithm.slackEnabled ?? false,
-      slackPenalty: algorithm.slackPenalty ?? 1000000,
-      solver: (algorithm.solver === 'HiGHS' || algorithm.solver === 'COPT' || algorithm.solver === 'SCIP') ? algorithm.solver : 'HiGHS'
+      shortagePenalty: algorithm.shortagePenalty ?? algorithm.slackPenalty ?? 1000,
+      excessPenalty: algorithm.excessPenalty ?? algorithm.slackPenalty ?? 50,
+      solver: (algorithm.solver === 'HiGHS' || algorithm.solver === 'COPT') ? algorithm.solver : 'HiGHS'
     }
   }
 }

@@ -8,6 +8,7 @@ import type {
   CapacityPlanningFormSchema,
   CapacityVariableDraft,
   CapacityEconomicsConfig,
+  CapacityLifecycleParams,
   CapacityPlanningLifecycleBreakdown,
   CapacityVariableChangeKind,
   CapacityVariableValueKind,
@@ -19,7 +20,7 @@ import type {
   ScenarioPreviewResult
 } from '~~/types/capacity-planning'
 import type { Project } from '~~/types/project'
-import { BOUNDARY_MEANING_LABELS } from '~~/types/boundary'
+import { boundaryAxisName, BOUNDARY_MEANING_LABELS } from '~~/types/boundary'
 
 import { useCapacityPlanningApi } from '~~/composables/api/useCapacityPlanningApi'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
@@ -58,6 +59,30 @@ const lifecycleBreakdown = computed<CapacityPlanningLifecycleBreakdown>(
 )
 const lifecycleIndicators = computed(() => lifecycleBreakdown.value.indicators ?? null)
 const lifecycleAvailable = computed(() => Boolean(lifecycleIndicators.value))
+/** fitness 拆解：目标 + 约束惩罚（result.breakdown） */
+const fitnessBreakdown = computed<Record<string, unknown>>(
+  () => (planningResult.value?.breakdown ?? {}) as Record<string, unknown>
+)
+const technicalMetricsRows = computed(() => {
+  const bd = fitnessBreakdown.value as Record<string, any>
+  const tech = (bd.technicalMetrics ?? {}) as Record<string, number>
+  const details = (bd.technicalConstraintDetails ?? []) as Array<Record<string, any>>
+  const labels: Record<string, string> = {
+    renewableConsumptionRate: '新能源消纳率',
+    greenPowerShare: '绿电占比',
+    purchasedPowerShare: '购电占比',
+    stability: '稳定性'
+  }
+  return Object.entries(labels).map(([key, label]) => {
+    const detail = details.find(item => item.key === key)
+    return {
+      key,
+      label,
+      value: tech[key] != null && Number.isFinite(Number(tech[key])) ? Number(tech[key]).toFixed(1) : '—',
+      penalty: Number(detail?.penalty ?? 0)
+    }
+  })
+})
 // C-405 方案比较：统一指标、基准差异、输入版本、可解释排名
 const comparison = ref<CapacityPlanningComparison | null>(null)
 const comparisonLoading = ref(false)
@@ -143,7 +168,7 @@ const exportComparisonCsv = () => {
   anchor.click()
   URL.revokeObjectURL(url)
 }
-/** 敏感性矩阵列（碳/可靠性/灵活性未接线，也列出并显示空排名） */
+/** 敏感性矩阵列（与 metricSources 一致） */
 const comparisonRankKeys = computed<CapacityComparisonMetricKey[]>(() =>
   (comparison.value?.metricSources ?? []).map(item => item.key)
 )
@@ -226,6 +251,20 @@ const loadApplies = async () => {
   }
   finally {
     applyRecordsLoading.value = false
+  }
+}
+/** 已完成任务：从后端恢复最优结果（planning_results / result.json），并进入第 6 步 */
+const restoreCompletedTaskView = async () => {
+  if (!planningTask.value || planningTask.value.status !== 'completed') return
+  try {
+    planningResult.value = await planningApi.getPlanningResult(planningTask.value.id)
+    await loadComparison()
+    await loadApplies()
+    currentStep.value = 6
+  }
+  catch (error) {
+    console.warn('[CapPlan] restore completed result failed:', error)
+    planningResult.value = null
   }
 }
 const undoApplyRecord = async (applyId: string) => {
@@ -340,7 +379,8 @@ const optimizer = reactive({
   populationSize: 10,
   maxTimeSeconds: 300,
   seed: 20260828,
-  failurePenalty: 1e10
+  failurePenalty: 0,
+  technicalPenalty: 1e7
 })
 
 const objectiveOptions: Array<{ value: CapacityPlanObjective; label: string }> = [
@@ -363,11 +403,30 @@ const objectiveSettings = reactive<CapacityEconomicsConfig>({
     purchasedPowerShare: { enabled: false, operator: 'lte', threshold: 30, unit: '%' },
     stability: { enabled: false, operator: 'gte', threshold: 95, unit: '%' }
   },
+  // 经济性参数始终生效（无勾选）；targetIrrPercent 为默认最低收益率约束
   economicConstraints: {
-    lifecycleYears: { enabled: false, operator: 'gte', threshold: 20, unit: '年' },
-    interestRatePercent: { enabled: false, operator: 'lte', threshold: 5, unit: '%' },
-    taxRatePercent: { enabled: false, operator: 'lte', threshold: 25, unit: '%' },
-    targetIrrPercent: { enabled: false, operator: 'gte', threshold: 8, unit: '%' }
+    lifecycleYears: { enabled: true, operator: 'gte', threshold: 20, unit: '年' },
+    interestRatePercent: { enabled: true, operator: 'lte', threshold: 8, unit: '%' },
+    taxRatePercent: { enabled: true, operator: 'lte', threshold: 25, unit: '%' },
+    targetIrrPercent: { enabled: true, operator: 'gte', threshold: 8, unit: '%' }
+  },
+  lifecycle: {
+    tax_holiday_years: 3,
+    tax_half_years: 3,
+    income_tax_rate: 0.25,
+    output_vat_rate: 13,
+    input_vat_rate: 13,
+    construction_vat_rate: 10,
+    surcharge_rate: 12,
+    working_capital_rate: 30,
+    salvage_rate_default: 5,
+    staff_salary_wan: 15,
+    fixed_om_ratio: 0,
+    fixed_om_wan: 0,
+    subsidy_yuan_per_kwh: 0,
+    capacity_compensation_yuan_per_kw_year: 0,
+    replace_cycle_years: 0,
+    irr_penalty_weight: 1
   },
   extensions: {}
 })
@@ -383,20 +442,60 @@ const technicalConstraintItems = computed(() => [
   { key: 'stability' as const, label: '稳定性', hint: '不低于' }
 ])
 
-const economicConstraintItems = computed(() => [
-  { key: 'lifecycleYears' as const, label: '生命周期', hint: '不低于', min: 1, max: 100, step: 1 },
-  { key: 'interestRatePercent' as const, label: '利率', hint: '不高于', min: 0, max: 100, step: 0.1 },
-  { key: 'taxRatePercent' as const, label: '税率', hint: '不高于', min: 0, max: 100, step: 0.1 },
-  { key: 'targetIrrPercent' as const, label: '内部收益率', hint: '不低于', min: 0, max: 100, step: 0.1 }
+/** 经济性参数：始终生效，仅录入数值（无启用勾选） */
+const economicCoreItems = computed(() => [
+  { key: 'lifecycleYears' as const, label: '运营期', suffix: '年', min: 1, max: 100, step: 1, hint: '生命周期评价年限' },
+  { key: 'interestRatePercent' as const, label: '折现率', suffix: '%', min: 0, max: 100, step: 0.1, hint: 'NPV/折现回收期/LCOE' },
+  { key: 'taxRatePercent' as const, label: '所得税率', suffix: '%', min: 0, max: 100, step: 0.1, hint: '企业所得税' },
+  { key: 'targetIrrPercent' as const, label: '最低内部收益率', suffix: '%', min: 0, max: 100, step: 0.1, hint: '默认约束：IRR 低于阈值计入惩罚' }
 ])
 
-const capacityEconomicsPayload = (): CapacityEconomicsConfig => JSON.parse(JSON.stringify(objectiveSettings))
+type LifecycleFieldKey = keyof CapacityLifecycleParams
+
+const lifecycleParamGroups = computed(() => [
+  {
+    title: '税收参数',
+    hint: '价税分离与三免三减半，影响 NPV/IRR',
+    items: [
+      { key: 'tax_holiday_years' as LifecycleFieldKey, label: '免税年数', suffix: '年', min: 0, max: 20, step: 1 },
+      { key: 'tax_half_years' as LifecycleFieldKey, label: '减半年数', suffix: '年', min: 0, max: 20, step: 1 },
+      { key: 'output_vat_rate' as LifecycleFieldKey, label: '销项增值税率', suffix: '%', min: 0, max: 30, step: 0.1 },
+      { key: 'input_vat_rate' as LifecycleFieldKey, label: '进项增值税率', suffix: '%', min: 0, max: 30, step: 0.1 },
+      { key: 'construction_vat_rate' as LifecycleFieldKey, label: '建设增值税率', suffix: '%', min: 0, max: 30, step: 0.1 },
+      { key: 'surcharge_rate' as LifecycleFieldKey, label: '附加税率', suffix: '%', min: 0, max: 30, step: 0.1 }
+    ]
+  },
+  {
+    title: '投资与运维',
+    hint: '流动资金、残值、固定运维与收益补贴',
+    items: [
+      { key: 'working_capital_rate' as LifecycleFieldKey, label: '流动资金率', suffix: '元/容量单位', min: 0, max: 1000, step: 1 },
+      { key: 'salvage_rate_default' as LifecycleFieldKey, label: '默认残值率', suffix: '%', min: 0, max: 50, step: 0.1 },
+      { key: 'staff_salary_wan' as LifecycleFieldKey, label: '人员年薪', suffix: '万元', min: 0, max: 100, step: 0.5 },
+      { key: 'fixed_om_ratio' as LifecycleFieldKey, label: '固定运维比例', suffix: '%/年', min: 0, max: 20, step: 0.1 },
+      { key: 'fixed_om_wan' as LifecycleFieldKey, label: '固定运维定额', suffix: '万元/年', min: 0, max: 100000, step: 1 },
+      { key: 'subsidy_yuan_per_kwh' as LifecycleFieldKey, label: '电量补贴', suffix: '元/kWh', min: 0, max: 10, step: 0.001 },
+      { key: 'capacity_compensation_yuan_per_kw_year' as LifecycleFieldKey, label: '容量补偿', suffix: '元/kW·年', min: 0, max: 10000, step: 1 },
+      { key: 'replace_cycle_years' as LifecycleFieldKey, label: '替换周期', suffix: '年', min: 0, max: 50, step: 1, hint: '0=按折旧年限' },
+      { key: 'irr_penalty_weight' as LifecycleFieldKey, label: 'IRR 惩罚权重', suffix: '', min: 0, max: 100, step: 0.1 }
+    ]
+  }
+])
+
+const capacityEconomicsPayload = (): CapacityEconomicsConfig => {
+  const payload = JSON.parse(JSON.stringify(objectiveSettings)) as CapacityEconomicsConfig
+  // 参数始终生效，避免旧任务里的 enabled:false 写回后端被当关闭
+  for (const item of economicCoreItems.value) {
+    payload.economicConstraints[item.key].enabled = true
+  }
+  return payload
+}
 
 const planningSteps = [
   { id: 1, title: '容量变量配置', description: '确定参与规划的设备与容量范围' },
   { id: 2, title: '历史边界数据', description: '核对边界配置并预览时序数据' },
   { id: 3, title: '典型场景聚类', description: '配置聚类参数并预览代表性场景' },
-  { id: 4, title: '规划目标设置', description: '配置方案目标、技术性约束和经济性约束' },
+  { id: 4, title: '规划目标设置', description: '配置方案目标、技术性约束和经济性参数' },
   { id: 5, title: '求解过程设置', description: '设置算法参数并观察求解过程' },
   { id: 6, title: '容量配置方案', description: '比较优化前后容量并应用最优方案' }
 ] as const
@@ -479,10 +578,11 @@ const clusteringFeatureOptions = computed(() => {
 const selectedBoundaryPreviewData = computed(() => {
   const boundary = selectedBoundary.value
   if (!boundary) return null
-  // 优先使用中文标签，与边界配置页保持一致
-  const yAxisLabel = BOUNDARY_MEANING_LABELS[boundary.meaning as keyof typeof BOUNDARY_MEANING_LABELS]
-    || boundary.meaning
-    || boundary.rawData?.yAxisLabel
+  // 优先使用中文标签+单位，与边界配置页保持一致
+  const yAxisLabel = boundaryAxisName(
+    boundary.meaning || 'load',
+    (boundary as { unit?: string }).unit
+  ) || boundary.rawData?.yAxisLabel
     || ''
   if (boundary.rawData?.values.length) {
     return {
@@ -837,11 +937,15 @@ const confirmTypicalScenarios = () => {
 const objectiveSettingsValid = computed(() => {
   const technicalConstraints = Object.values(objectiveSettings.technicalConstraints)
   const economicConstraints = objectiveSettings.economicConstraints
+  const lifecycle = objectiveSettings.lifecycle
   return technicalConstraints.every(item => item.threshold >= 0 && item.threshold <= 100)
     && economicConstraints.lifecycleYears.threshold >= 1
     && economicConstraints.lifecycleYears.threshold <= 100
     && [economicConstraints.interestRatePercent, economicConstraints.taxRatePercent, economicConstraints.targetIrrPercent]
       .every(item => item.threshold >= 0 && item.threshold <= 100)
+    && Object.values(lifecycle).every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+    && (lifecycle.replace_cycle_years ?? 0) <= 50
+    && (lifecycle.irr_penalty_weight ?? 1) >= 0
 })
 
 const confirmObjective = async () => {
@@ -974,7 +1078,10 @@ const optimizerValid = computed(() =>
   && optimizer.populationSize >= 2
   && optimizer.populationSize <= 500
   && Number(optimizer.maxTimeSeconds) >= 1
-  && Number(optimizer.failurePenalty) > 0
+  && Number.isFinite(Number(optimizer.failurePenalty))
+  && Number(optimizer.failurePenalty) >= 0
+  && Number.isFinite(Number(optimizer.technicalPenalty))
+  && Number(optimizer.technicalPenalty) >= 0
 )
 const planningPrerequisitesReady = computed(() =>
   Boolean(project.value && schema.value && configuredBoundaries.value.length > 0 && scenarioPreview.value && objectiveConfirmed.value)
@@ -1459,10 +1566,11 @@ const selectTask = async (taskId: string) => {
       optimizer.maxFuncEvals = o.maxFuncEvals || 20
       optimizer.populationSize = o.populationSize || 10
       optimizer.seed = o.seed || 20260828
-      optimizer.failurePenalty = o.failurePenalty || 1e18
+      optimizer.failurePenalty = o.failurePenalty ?? 0
+      optimizer.technicalPenalty = o.technicalPenalty ?? 1e7
     }
 
-    // 恢复方案目标、技术约束和经济性约束；兼容旧版经济参数配置
+    // 恢复方案目标、技术性约束与经济性参数；兼容旧任务配置
     if (planningTask.value?.config?.economics) {
       const economics = planningTask.value.config.economics
       if (objectiveOptions.some(option => option.value === economics.objective)) {
@@ -1477,22 +1585,27 @@ const selectTask = async (taskId: string) => {
         }
       }
       if (economics.economicConstraints) {
-        for (const item of economicConstraintItems.value) {
+        for (const item of economicCoreItems.value) {
           Object.assign(
             objectiveSettings.economicConstraints[item.key],
             economics.economicConstraints[item.key] ?? {}
           )
+          // 参数始终生效；旧任务 enabled:false 仅作历史字段忽略
+          objectiveSettings.economicConstraints[item.key].enabled = true
         }
+      }
+      if (economics.lifecycle && typeof economics.lifecycle === 'object') {
+        Object.assign(objectiveSettings.lifecycle, economics.lifecycle)
       }
       objectiveSettings.extensions = economics.extensions ?? {}
     }
 
-    // C-405：已完成任务直接加载方案比较；未完成则清空旧比较
+    // C-405/C-406：已完成任务恢复最优结果、方案比较与应用记录
     if (planningTask.value?.status === 'completed') {
-      await loadComparison()
-      await loadApplies()
+      await restoreCompletedTaskView()
     }
     else {
+      planningResult.value = null
       comparison.value = null
       comparisonExpandedId.value = null
       applyRecords.value = []
@@ -1554,7 +1667,8 @@ const createTask = async () => {
         populationSize: Number(optimizer.populationSize),
         maxTimeSeconds: Number(optimizer.maxTimeSeconds),
         seed: Number(optimizer.seed),
-        failurePenalty: Number(optimizer.failurePenalty)
+        failurePenalty: Number(optimizer.failurePenalty),
+        technicalPenalty: Number(optimizer.technicalPenalty)
       },
       economics: capacityEconomicsPayload()
     })
@@ -1736,15 +1850,12 @@ const refreshPlanning = async () => {
     planningTask.value = task
     if (planningTask.value.status === 'completed') {
       cancellationPending.value = false
-      planningResult.value = await planningApi.getPlanningResult(planningTask.value.id)
-      await loadComparison()
-      await loadApplies()
-      currentStep.value = 6
+      await restoreCompletedTaskView()
       clearPlanningPoll()
       push({
         tone: 'success',
         title: '容量规划完成',
-        description: `${planningResult.value.evaluationCount} 次评价，最优目标 ${formatNumber(planningResult.value.fitness)}`
+        description: `${planningResult.value?.evaluationCount ?? 0} 次评价，最优目标 ${formatNumber(planningResult.value?.fitness ?? 0)}`
       })
     }
     else if (planningTask.value.status === 'failed' || planningTask.value.status === 'cancelled') {
@@ -1815,7 +1926,8 @@ const createAndStartPlanning = async () => {
         populationSize: Number(optimizer.populationSize),
         maxTimeSeconds: Number(optimizer.maxTimeSeconds),
         seed: Number(optimizer.seed),
-        failurePenalty: Number(optimizer.failurePenalty)
+        failurePenalty: Number(optimizer.failurePenalty),
+        technicalPenalty: Number(optimizer.technicalPenalty)
       },
       economics: capacityEconomicsPayload()
     })
@@ -2004,6 +2116,11 @@ watch(currentStep, async (step) => {
   else if (step !== 3) disposeScenarioCharts()
   if (step === 5) {
     renderSolverCharts()
+    // 步骤五图表容器改为 flex 自适应高度，需在布局完成后再次 resize
+    void nextTick().then(() => {
+      convergenceChart?.resize()
+      capacityChangeChart?.resize()
+    })
     startPlanningLogSequence()
   }
   else {
@@ -2032,8 +2149,15 @@ onBeforeUnmount(() => {
 
 await Promise.all([loadSchema(), loadDatasetContext(), loadTaskList()])
 
-// 如果没有任务，自动弹出新建任务弹窗
-if (taskList.value.length === 0) {
+// 恢复上次任务视图：优先最近完成的任务，其次最近任务，避免刷新后第 6 步结果“丢失”
+if (taskList.value.length > 0) {
+  const completed = taskList.value.filter(task => task.status === 'completed')
+  const pick = completed[0] ?? taskList.value[0]
+  if (pick?.id) {
+    await selectTask(pick.id)
+  }
+}
+else {
   showCreateTaskDialog.value = true
 }
 
@@ -2497,97 +2621,128 @@ useHead(() => ({
                 </div>
               </div>
 
-              <div class="rounded-lg border border-app-border bg-white">
+              <div class="rounded-none border border-app-border bg-white">
                 <div class="border-b border-app-border px-5 py-4">
                   <h3 class="font-semibold text-app-text">技术性约束</h3>
+                  <p class="mt-1 text-xs text-app-muted">软约束：按阈值偏差（百分点）×「技术约束惩罚」计入 fitness；系数在下方优化器表单配置。</p>
                 </div>
-                <div class="grid grid-cols-4 gap-4 p-5">
+                <div class="grid grid-cols-2 gap-3 p-4 xl:grid-cols-4">
                   <div
                     v-for="item in technicalConstraintItems"
                     :key="item.key"
-                    class="p-4 transition shadow-md"
+                    class="flex items-center gap-2 rounded-none border border-app-border bg-white px-3 py-2 shadow-md transition"
                     :class="objectiveSettings.technicalConstraints[item.key].enabled ? 'border-primary/40 bg-blue-50/50' : 'border-app-border bg-white'"
                   >
-                    <div class="flex items-center justify-between gap-3">
-                      <span class="text-sm font-medium text-app-text">{{ item.label }}</span>
-                      <label class="inline-flex cursor-pointer items-center gap-2 text-sm text-app-muted">
-                        <input v-model="objectiveSettings.technicalConstraints[item.key].enabled" class="field-checkbox" type="checkbox">
-                        启用
-                      </label>
-                    </div>
-                    <label class="mt-4 flex items-center gap-2">
-                      <span class="shrink-0 text-sm text-app-muted">{{ item.hint }}</span>
+                    <span class="w-[6.5rem] shrink-0 whitespace-nowrap text-sm font-medium text-app-text">{{ item.label }}</span>
+                    <span class="shrink-0 whitespace-nowrap text-xs text-app-muted">{{ item.hint }}</span>
+                    <div class="w-20 shrink-0">
                       <input
                         v-model.number="objectiveSettings.technicalConstraints[item.key].threshold"
-                        class="field-input min-w-0"
+                        class="field-input"
                         type="number"
                         min="0"
                         max="100"
                         step="0.1"
                         :disabled="!objectiveSettings.technicalConstraints[item.key].enabled"
                       >
-                      <span class="text-sm text-app-muted">%</span>
+                    </div>
+                    <span class="w-6 shrink-0 whitespace-nowrap text-sm text-app-muted">%</span>
+                    <label class="ml-auto inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs text-app-muted">
+                      <input v-model="objectiveSettings.technicalConstraints[item.key].enabled" class="field-checkbox" type="checkbox">
+                      启用
                     </label>
                   </div>
                 </div>
               </div>
 
-              <div class="rounded-lg border border-app-border bg-white">
+              <div class="rounded-none border border-app-border bg-white">
                 <div class="border-b border-app-border px-5 py-4">
-                  <h3 class="font-semibold text-app-text">经济性约束</h3>
+                  <h3 class="font-semibold text-app-text">经济性参数</h3>
+                  <p class="mt-1 text-xs text-app-muted">用于 NPV / IRR / LCOE / 回收期计算，始终生效（无勾选）。最低内部收益率为默认约束：低于阈值按差额 × CAPEX 计入惩罚。</p>
                 </div>
-                <div class="grid grid-cols-4 gap-4 p-5">
-                  <div
-                    v-for="item in economicConstraintItems"
-                    :key="item.key"
-                    class="p-4 transition shadow-md"
-                    :class="objectiveSettings.economicConstraints[item.key].enabled ? 'border-primary/40 bg-blue-50/50' : 'border-app-border bg-white'"
-                  >
-                    <div class="flex items-center justify-between gap-3">
-                      <span class="text-sm font-medium text-app-text">{{ item.label }}</span>
-                      <label class="inline-flex cursor-pointer items-center gap-2 text-sm text-app-muted">
-                        <input v-model="objectiveSettings.economicConstraints[item.key].enabled" class="field-checkbox" type="checkbox">
-                        启用
-                      </label>
+
+                <div class="border-b border-app-border px-5 py-4">
+                  <div class="mb-3 text-sm font-medium text-app-text">核心评价参数</div>
+                  <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    <div
+                      v-for="item in economicCoreItems"
+                      :key="item.key"
+                      class="flex items-center gap-2 rounded-none border border-app-border bg-white px-3 py-2"
+                    >
+                      <span class="w-[7.5rem] shrink-0 whitespace-nowrap text-sm font-medium text-app-text">{{ item.label }}</span>
+                      <span class="min-w-0 flex-1 truncate text-xs text-app-muted" :title="item.hint">{{ item.hint }}</span>
+                      <div class="w-20 shrink-0">
+                        <input
+                          v-model.number="objectiveSettings.economicConstraints[item.key].threshold"
+                          class="field-input"
+                          type="number"
+                          :min="item.min"
+                          :max="item.max"
+                          :step="item.step"
+                        >
+                      </div>
+                      <span class="w-8 shrink-0 whitespace-nowrap text-sm text-app-muted">{{ item.suffix }}</span>
                     </div>
-                    <label class="mt-4 flex items-center gap-2">
-                      <span class="shrink-0 text-sm text-app-muted">{{ item.hint }}</span>
-                      <input
-                        v-model.number="objectiveSettings.economicConstraints[item.key].threshold"
-                        class="field-input min-w-0"
-                        type="number"
-                        :min="item.min"
-                        :max="item.max"
-                        :step="item.step"
-                        :disabled="!objectiveSettings.economicConstraints[item.key].enabled"
-                      >
-                      <span class="shrink-0 text-sm text-app-muted">{{ objectiveSettings.economicConstraints[item.key].unit }}</span>
-                    </label>
+                  </div>
+                </div>
+
+                <div
+                  v-for="group in lifecycleParamGroups"
+                  :key="group.title"
+                  class="border-b border-app-border px-5 py-4 last:border-b-0"
+                >
+                  <div class="mb-1 flex items-baseline gap-2">
+                    <div class="text-sm font-medium text-app-text">{{ group.title }}</div>
+                    <div class="text-xs text-app-muted">{{ group.hint }}</div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    <div
+                      v-for="item in group.items"
+                      :key="item.key"
+                      class="flex items-center gap-2 rounded-none border border-app-border bg-white px-3 py-2"
+                    >
+                      <span class="w-[7.5rem] shrink-0 whitespace-nowrap text-sm font-medium text-app-text">{{ item.label }}</span>
+                      <span v-if="'hint' in item && item.hint" class="min-w-0 flex-1 truncate text-xs text-app-muted" :title="item.hint">{{ item.hint }}</span>
+                      <span v-else class="min-w-0 flex-1" />
+                      <div class="w-20 shrink-0">
+                        <input
+                          v-model.number="objectiveSettings.lifecycle[item.key]"
+                          class="field-input"
+                          type="number"
+                          :min="item.min"
+                          :max="item.max"
+                          :step="item.step"
+                        >
+                      </div>
+                      <span class="min-w-[3.25rem] shrink-0 whitespace-nowrap text-xs text-app-muted">{{ item.suffix }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
 
               <div class="flex items-center justify-between rounded-lg border border-app-border bg-white px-5 py-4">
-                <p class="text-sm text-app-muted">方案目标、技术性约束与经济性约束将随容量规划任务保存。</p>
+                <p class="text-sm text-app-muted">方案目标、技术性约束与经济性参数将随容量规划任务保存。</p>
                 <AppButton label="确认当前目标，进入求解设置" tone="primary" :disabled="!objectiveSettingsValid" @click="confirmObjective" />
               </div>
             </section>
 
-            <section v-else-if="currentStep === 5" class="space-y-4">
-              <div class="rounded-lg border border-app-border bg-white p-5">
-                <div class="grid grid-cols-[repeat(5,minmax(0,1fr))_auto] items-center gap-5">
+            <section v-else-if="currentStep === 5" class="flex h-full min-h-0 flex-col gap-4">
+              <div class="flex-none rounded-lg border border-app-border bg-white p-5">
+                <div class="grid grid-cols-[repeat(6,minmax(0,1fr))_auto_auto] items-center gap-4">
                   <label class="flex min-w-0 items-center gap-3"><span class="!mb-0 shrink-0 whitespace-nowrap">最大评价次数</span><input v-model.number="optimizer.maxFuncEvals" class="field-input min-w-0" type="number" min="2" max="10000"></label>
                   <label class="flex min-w-0 items-center gap-3"><span class="!mb-0 shrink-0 whitespace-nowrap">种群规模</span><input v-model.number="optimizer.populationSize" class="field-input min-w-0" type="number" min="2" max="500"></label>
                   <label class="flex min-w-0 items-center gap-3"><span class="!mb-0 shrink-0 whitespace-nowrap">最长时间（秒）</span><input v-model.number="optimizer.maxTimeSeconds" class="field-input min-w-0" type="number" min="1"></label>
                   <label class="flex min-w-0 items-center gap-3"><span class="!mb-0 shrink-0 whitespace-nowrap">随机种子</span><input v-model.number="optimizer.seed" class="field-input min-w-0" type="number"></label>
-                  <label class="flex min-w-0 items-center gap-3"><span class="!mb-0 shrink-0 whitespace-nowrap">失败惩罚</span><input v-model.number="optimizer.failurePenalty" class="field-input min-w-0" type="number" min="1"></label>
+                  <label class="flex min-w-0 items-center gap-3" title="0=按目标量纲自动估算；填正数则作为失败惩罚基数，运行时仍会与「最优可行×10」取大以隔离可行解"><span class="!mb-0 shrink-0 whitespace-nowrap">失败惩罚</span><input v-model.number="optimizer.failurePenalty" class="field-input min-w-0" type="number" min="0"></label>
+                  <label class="flex min-w-0 items-center gap-3" title="元/百分点；建议 ≥1e7，过小则技术约束几乎不影响排序"><span class="!mb-0 shrink-0 whitespace-nowrap">技术约束惩罚</span><input v-model.number="optimizer.technicalPenalty" class="field-input min-w-0" type="number" min="0" step="1000000"></label>
                   <AppButton class="whitespace-nowrap" label="启动容量规划" tone="primary" :disabled="!canStartPlanning" @click="createAndStartPlanning" />
+                  <AppButton class="whitespace-nowrap" :label="planningCancellationRequested ? '正在终止…' : '终止计算'" tone="danger" :disabled="!planningActive || planningBusy || planningCancellationRequested" @click="cancelPlanning" />
                 </div>
               </div>
 
-              <div class="grid grid-cols-[330px_minmax(0,1fr)] items-stretch gap-4">
-                <div class="flex min-h-0 flex-col gap-3">
-                  <div class="flex h-[600px] min-h-0 flex-none flex-col overflow-hidden rounded-lg border border-app-border bg-white">
+              <div class="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)] items-stretch gap-4">
+                <div class="flex min-h-0 flex-col">
+                  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-app-border bg-white">
                     <div class="flex items-start justify-between gap-3 border-b border-app-border px-4 py-3">
                       <div class="min-w-0">
                         <h3 class="text-sm font-semibold text-app-text">容量规划运行日志</h3>
@@ -2641,19 +2796,18 @@ useHead(() => ({
                       <div v-if="planningError && planningTask?.status !== 'failed' && planningTask?.status !== 'cancelled'" class="relative z-10 mt-2 border-t border-app-danger/20 py-3 text-app-danger">[错误] {{ planningError }}</div>
                     </div>
 
-                    <div class="border-t border-app-border px-4 py-3">
+                    <div class="flex-none border-t border-app-border px-4 py-3">
                       <div class="h-1.5 overflow-hidden rounded-full bg-app-panel-soft">
                         <div class="h-full rounded-full bg-primary transition-all duration-300" :style="{ width: progressPercent + '%' }" />
                       </div>
                       <div class="mt-2 text-right text-xs text-app-muted">{{ planningTask?.progress.completedEvaluations ?? 0 }} / {{ planningTask?.progress.maxFuncEvals ?? optimizer.maxFuncEvals }} 次评价 · {{ progressPercent }}%</div>
                     </div>
                   </div>
-                  <AppButton class="w-full justify-center" :label="planningCancellationRequested ? '正在终止…' : '终止容量规划'" tone="danger" :disabled="!planningActive || planningBusy || planningCancellationRequested" @click="cancelPlanning" />
                 </div>
 
-                <div class="space-y-4">
-                  <div class="overflow-hidden rounded-lg border border-app-border bg-white">
-                  <div class="flex items-center justify-between border-b border-app-border px-4 py-3">
+                <div class="flex min-h-0 flex-col gap-4">
+                  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-app-border bg-white">
+                  <div class="flex flex-none items-center justify-between border-b border-app-border px-4 py-3">
                     <div>
                       <h3 class="text-sm font-semibold text-app-text">黑箱求解收敛曲线</h3>
                     </div>
@@ -2662,17 +2816,17 @@ useHead(() => ({
                       <div class="mt-0.5 font-bold text-primary">{{ planningTask?.progress.bestFitness === null || planningTask?.progress.bestFitness === undefined ? '—' : formatNumber(planningTask.progress.bestFitness) }}</div>
                     </div>
                   </div>
-                  <div ref="convergenceChartRef" class="h-72 w-full px-2 py-1" />
+                  <div ref="convergenceChartRef" class="min-h-0 w-full flex-1 px-2 py-1" />
                   </div>
 
-                  <div class="overflow-hidden rounded-lg border border-app-border bg-white">
-                    <div class="flex items-center justify-between border-b border-app-border px-4 py-3">
+                  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-app-border bg-white">
+                    <div class="flex flex-none items-center justify-between border-b border-app-border px-4 py-3">
                       <div>
                         <h3 class="text-sm font-semibold text-app-text">容量规划参数变化</h3>
                       </div>
                       <span class="rounded-[4px] bg-primary-soft px-3 py-1 text-xs font-medium text-primary">待优化变量：{{ capacityChartItems.length }}</span>
                     </div>
-                    <div ref="capacityChangeChartRef" class="h-72 w-full px-2 py-1" />
+                    <div ref="capacityChangeChartRef" class="min-h-0 w-full flex-1 px-2 py-1" />
                   </div>
                 </div>
               </div>
@@ -2682,9 +2836,9 @@ useHead(() => ({
               <template v-if="planningResult">
                 <div class="flex items-start justify-between gap-6 rounded-lg border border-primary/25 bg-blue-50 px-5 py-4">
                   <div>
-                    <div class="text-xs font-semibold text-primary">当前方案目标</div>
+                    <div class="text-xs font-semibold text-primary">当前方案目标（参与排序）</div>
                     <h3 class="mt-1 text-lg font-bold text-app-text">{{ selectedObjectiveLabel }}</h3>
-                    <p class="mt-1 text-xs leading-5 text-app-muted">综合 {{ scenarioPreview?.scenarios.length ?? 0 }} 个典型场景的全年权重，从 {{ planningResult.evaluationCount }} 次候选评价中选出。</p>
+                    <p class="mt-1 text-xs leading-5 text-app-muted">综合 {{ scenarioPreview?.scenarios.length ?? 0 }} 个典型场景的全年权重，从 {{ planningResult.evaluationCount }} 次候选评价中选出。排序依据为适应度，不是 NPV/LCOE。</p>
                   </div>
                   <span class="rounded-full bg-primary px-3 py-1 text-xs font-semibold text-white">最优方案</span>
                 </div>
@@ -2695,8 +2849,47 @@ useHead(() => ({
                   <div class="rounded-lg border border-app-border bg-white p-4"><div class="text-xs text-app-muted">失败评价</div><div class="mt-1 text-2xl font-bold" :class="planningResult.failedEvaluationCount ? 'text-app-warning' : 'text-app-success'">{{ planningResult.failedEvaluationCount }}</div></div>
                 </div>
 
-                <!-- C-403 生命周期经济（全投资口径，不参与 fitness） -->
+                <!-- fitness 拆解：objective + 约束惩罚 -->
+                <div class="rounded-lg border border-app-border bg-white px-5 py-4">
+                  <h3 class="text-sm font-semibold text-app-text">适应度构成</h3>
+                  <p class="mt-1 text-xs text-app-muted">fitness = 目标项 + 约束惩罚；单位与目标函数一致（元）。</p>
+                  <div class="mt-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <div class="rounded-md border border-app-border/80 bg-app-panel-soft/40 px-3 py-2">
+                      <div class="text-[11px] text-app-muted">目标项 objectiveFitness</div>
+                      <div class="mt-0.5 text-base font-bold text-app-text">{{ formatNumber(Number(fitnessBreakdown.objectiveFitness ?? planningResult.fitness)) }}</div>
+                    </div>
+                    <div class="rounded-md border border-app-border/80 bg-app-panel-soft/40 px-3 py-2">
+                      <div class="text-[11px] text-app-muted">约束惩罚 constraintPenalty</div>
+                      <div class="mt-0.5 text-base font-bold" :class="Number(fitnessBreakdown.constraintPenalty ?? 0) > 0 ? 'text-app-warning' : 'text-app-text'">{{ formatNumber(Number(fitnessBreakdown.constraintPenalty ?? 0)) }}</div>
+                    </div>
+                    <div class="rounded-md border border-primary/40 bg-blue-50/60 px-3 py-2">
+                      <div class="text-[11px] text-primary">适应度 fitness</div>
+                      <div class="mt-0.5 text-base font-bold text-primary">{{ formatNumber(planningResult.fitness) }}</div>
+                    </div>
+                    <div class="rounded-md border border-app-border/80 bg-app-panel-soft/40 px-3 py-2">
+                      <div class="text-[11px] text-app-muted">加权运行成本</div>
+                      <div class="mt-0.5 text-base font-bold text-app-text">{{ formatNumber(Number(fitnessBreakdown.weightedOperatingCost ?? 0)) }}</div>
+                    </div>
+                  </div>
+                  <div class="mt-3 border-t border-app-border/60 pt-3">
+                    <div class="text-xs font-medium text-app-text">技术约束</div>
+                    <div class="mt-2 grid grid-cols-2 gap-2 md:grid-cols-4">
+                      <div v-for="item in technicalMetricsRows" :key="item.key" class="rounded-md border border-app-border/70 px-3 py-2 text-xs">
+                        <div class="text-app-muted">{{ item.label }}</div>
+                        <div class="mt-0.5 font-semibold text-app-text">{{ item.value }}%</div>
+                        <div v-if="item.penalty > 0" class="mt-0.5 text-app-warning">惩罚 {{ formatNumber(item.penalty) }}</div>
+                        <div v-else class="mt-0.5 text-app-success">无惩罚</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- C-403 生命周期经济（参考指标，不参与 fitness 排序） -->
                 <div v-if="lifecycleAvailable" class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <h3 class="text-sm font-semibold text-app-text">生命周期经济指标</h3>
+                    <span class="rounded-full bg-app-panel-soft px-2 py-0.5 text-[11px] text-app-muted">参考 · 不参与排序</span>
+                  </div>
                   <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
                     <div class="rounded-lg border border-app-border bg-white p-4"><div class="text-xs text-app-muted">净现值 NPV（税后）</div><div class="mt-1 text-xl font-bold text-app-text">{{ formatYuanYi(lifecycleIndicators?.npv) }}</div></div>
                     <div class="rounded-lg border border-app-border bg-white p-4"><div class="text-xs text-app-muted">内部收益率 IRR（税后）</div><div class="mt-1 text-xl font-bold text-app-text">{{ formatPercent(lifecycleIndicators?.irr) }}</div></div>
@@ -2704,7 +2897,7 @@ useHead(() => ({
                     <div class="rounded-lg border border-app-border bg-white p-4"><div class="text-xs text-app-muted">投资回收期（税后，折现）</div><div class="mt-1 text-xl font-bold text-app-text">{{ formatYears(lifecycleBreakdown.lifecycleDiscountedPaybackYears ?? lifecycleBreakdown.lifecyclePaybackYears) }}</div></div>
                   </div>
                   <div class="rounded-lg border border-app-border bg-white px-4 py-3 text-xs text-app-muted">
-                    全投资口径：建设投资 {{ formatWanYi(lifecycleBreakdown.lifecycleCapexWan) }}（含建设期增值税 {{ formatWanYi(lifecycleBreakdown.lifecycleConstructionVatWan) }}），流动资金 {{ formatWanYi(lifecycleBreakdown.lifecycleWorkingCapitalWan) }}<template v-if="lifecycleBreakdown.lifecycleDisposalRecoveryWan">，替换/退役处置回收 {{ formatWanYi(lifecycleBreakdown.lifecycleDisposalRecoveryWan) }}</template>；年折旧 {{ formatWanYi(lifecycleBreakdown.lifecycleAnnualDepreciationWan) }}，年调整所得税 {{ formatWanYi(lifecycleBreakdown.lifecycleAnnualAdjustedTaxWan) }}。指标不参与优化适应度。
+                    全投资口径：建设投资 {{ formatWanYi(lifecycleBreakdown.lifecycleCapexWan) }}（含建设期增值税 {{ formatWanYi(lifecycleBreakdown.lifecycleConstructionVatWan) }}），流动资金 {{ formatWanYi(lifecycleBreakdown.lifecycleWorkingCapitalWan) }}<template v-if="lifecycleBreakdown.lifecycleDisposalRecoveryWan">，替换/退役处置回收 {{ formatWanYi(lifecycleBreakdown.lifecycleDisposalRecoveryWan) }}</template>；年折旧 {{ formatWanYi(lifecycleBreakdown.lifecycleAnnualDepreciationWan) }}，年调整所得税 {{ formatWanYi(lifecycleBreakdown.lifecycleAnnualAdjustedTaxWan) }}。LCOE 分母为上网电量。上述指标仅作参考，不参与适应度排序。
                   </div>
                 </div>
 
@@ -2777,22 +2970,17 @@ useHead(() => ({
                               <span v-else class="rounded-full bg-orange-100 px-2 py-0.5 text-xs text-app-warning" :title="candidate.failureReason ?? ''">不可行</span>
                             </td>
                             <td v-for="source in comparison.metricSources" :key="source.key" class="px-3 py-3">
-                              <template v-if="source.key === 'carbonTons' || source.key === 'reliability' || source.key === 'flexibility'">
-                                <span class="text-app-muted">待 F 线</span>
-                              </template>
-                              <template v-else>
-                                <div class="font-medium text-app-text">{{ formatMetricValue(source.key, candidate.metrics.values[source.key]) }}</div>
-                                <div
-                                  v-if="!candidate.isBest && comparisonDiffLabel(candidate, source.key)"
-                                  class="text-[11px]"
-                                  :class="comparisonDiffTone(candidate, source.key)"
-                                >{{ comparisonDiffLabel(candidate, source.key) }}</div>
-                              </template>
+                              <div class="font-medium text-app-text">{{ formatMetricValue(source.key, candidate.metrics.values[source.key]) }}</div>
+                              <div
+                                v-if="!candidate.isBest && comparisonDiffLabel(candidate, source.key)"
+                                class="text-[11px]"
+                                :class="comparisonDiffTone(candidate, source.key)"
+                              >{{ comparisonDiffLabel(candidate, source.key) }}</div>
                             </td>
                             <td class="px-3 py-3 text-xs text-primary">{{ comparisonExpandedId === candidate.evaluationId ? '收起' : '展开' }}</td>
                           </tr>
                           <tr v-if="comparisonExpandedId === candidate.evaluationId" class="border-t border-app-border bg-app-panel-soft/40">
-                            <td colspan="17" class="px-5 py-4">
+                            <td :colspan="4 + (comparison.metricSources?.length ?? 0)" class="px-5 py-4">
                               <div class="grid gap-4 md:grid-cols-3">
                                 <!-- 容量明细 -->
                                 <div>
@@ -2879,7 +3067,7 @@ useHead(() => ({
                         </tbody>
                       </table>
                     </div>
-                    <p class="mt-2 text-[11px] text-app-muted">指标来源与公式版本悬停表头可见；碳排放、可靠性、灵活性为 F 线后验指标，接线前以「待 F 线」占位，不参与排名。</p>
+                    <p class="mt-2 text-[11px] text-app-muted">指标来源与公式版本悬停表头可见；排名以适应度升序为准，其余指标排名仅作敏感性对照。</p>
                   </div>
                 </div>
                 <div v-else-if="comparisonLoading" class="rounded-lg border border-dashed border-app-border bg-white px-5 py-6 text-center text-sm text-app-muted">正在生成方案比较…</div>

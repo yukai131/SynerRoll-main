@@ -84,7 +84,8 @@ export const buildBackendPayload = (project: Project): BackendExportPayload => {
       optimizationAlgorithm: project.algorithm.optimizationAlgorithm,
       solver: project.algorithm.solver,
       slackEnabled: project.algorithm.slackEnabled,
-      slackPenalty: project.algorithm.slackPenalty
+      shortagePenalty: project.algorithm.shortagePenalty,
+      excessPenalty: project.algorithm.excessPenalty
     },
     boundary: project.boundaries,
     component,

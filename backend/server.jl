@@ -145,6 +145,12 @@ begin
     include("components/power_grid/flexibility.jl")
     include("components/power_grid/model.jl")
 
+    include("components/hydrogen_grid/component.jl")
+    include("components/hydrogen_grid/validation.jl")
+    include("components/hydrogen_grid/model-common.jl")
+    include("components/hydrogen_grid/flexibility.jl")
+    include("components/hydrogen_grid/model.jl")
+
     include("components/hydro_power/component.jl")
     include("components/hydro_power/validation.jl")
     include("components/hydro_power/model-common.jl")
@@ -165,13 +171,13 @@ begin
     include("services/flexibility_result_service.jl")
 
     # 容量规划服务（后期加载，依赖 services）
-    include("services/capacity_planning/simulation_evaluator.jl")
     include("services/capacity_planning/lifecycle_economics.jl")
+    include("services/capacity_planning/simulation_evaluator.jl")
     include("services/capacity_planning/economic_evaluator.jl")
+    include("services/capacity_planning/comparison_summary.jl")
     include("services/capacity_planning/planning_store.jl")
     include("services/capacity_planning/optimization_runner.jl")
     include("services/capacity_planning/planning_manager.jl")
-    include("services/capacity_planning/comparison_summary.jl")
 
     # 计算任务模块（计算任务方案：阶段 1-4）
     include("services/task_manager.jl")
@@ -823,14 +829,6 @@ println("║  5. POST /api/results   - 数据可视化       ║")
 println("╚═══════════════════════════════════════════╝")
 println("Starting on port $PORT...")
 
-# 启动恢复：把上次运行中"中断"的 solving 任务改为 paused
-if get(ENV, "SYNERROLL_CAPACITY_WORKER", "0") != "1"
-    init_task_routes!()
-    init_ingest_routes!()
-    reconcile_planning_tasks!()
-end
-
-
 # ───── 启动预热：避免首次点开/建任务时 JIT 卡顿 ─────
 function warmup_backend()
     t0 = time()
@@ -865,7 +863,10 @@ function warmup_backend()
     return nothing
 end
 
-if get(ENV, "SYNERROLL_CAPACITY_WORKER", "0") != "1"
+# 容量规划 worker 只跑优化，不启动 HTTP/任务路由，避免与父进程争用 tasks.db
+if get(ENV, "SYNERROLL_CAPACITY_WORKER", "") != "1"
+    init_task_routes!()
+    init_ingest_routes!()
     warmup_backend()
     serve(host="0.0.0.0", port=PORT, async=false, middleware=[CorsMiddleware])
 end

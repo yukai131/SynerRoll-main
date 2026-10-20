@@ -106,6 +106,30 @@ function minimum_flexibility_limit(
     return second_limit, second_constraint
 end
 
+"""
+Snap baseline power that is only slightly outside [min, max] back onto the
+boundary. Large violations are left untouched so the caller can still error.
+"""
+function clamp_baseline_power_near_limits(
+    current_power_kw::Real,
+    minimum_power_kw::Real,
+    maximum_power_kw::Real;
+    slack_kw::Real=1e-4,
+)
+    power = Float64(current_power_kw)
+    lower = Float64(minimum_power_kw)
+    upper = Float64(maximum_power_kw)
+    slack = max(Float64(slack_kw), lower * 1e-6, upper * 1e-6)
+
+    if power < lower && power >= lower - slack
+        return lower
+    end
+    if power > upper && power <= upper + slack
+        return upper
+    end
+    return power
+end
+
 function calculate_generator_flexibility(
     component::AbstractComponent,
     context::ComponentFlexibilityContext;
@@ -188,8 +212,16 @@ function calculate_generator_flexibility(
         )
     end
 
-    minimum_power_kw - 1e-9 <= current_power_kw <= maximum_power_kw + 1e-9 ||
-        error("Online generator power_kw must be within its current power limits.")
+    current_power_kw = clamp_baseline_power_near_limits(
+        current_power_kw,
+        minimum_power_kw,
+        maximum_power_kw,
+    )
+
+    minimum_power_kw - 1e-9 <= current_power_kw <= maximum_power_kw + 1e-9 || error(
+        "Online generator power_kw must be within its current power limits " *
+        "(power_kw=$(current_power_kw), min=$(minimum_power_kw), max=$(maximum_power_kw)).",
+    )
 
     upward_value, upward_constraint = minimum_flexibility_limit(
         maximum_power_kw - current_power_kw,
@@ -475,8 +507,16 @@ function calculate_flexible_load_flexibility(
         )
     end
 
-    minimum_power_kw - 1e-9 <= current_power_kw <= maximum_power_kw + 1e-9 ||
-        error("Online flexible load power_kw must be within its current power limits.")
+    current_power_kw = clamp_baseline_power_near_limits(
+        current_power_kw,
+        minimum_power_kw,
+        maximum_power_kw,
+    )
+
+    minimum_power_kw - 1e-9 <= current_power_kw <= maximum_power_kw + 1e-9 || error(
+        "Online flexible load power_kw must be within its current power limits " *
+        "(power_kw=$(current_power_kw), min=$(minimum_power_kw), max=$(maximum_power_kw)).",
+    )
 
     # 系统方向：负荷降低是上调，负荷增加是下调。
     upward_value, upward_constraint = minimum_flexibility_limit(

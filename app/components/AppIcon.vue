@@ -173,7 +173,7 @@ const fallback = computed(() => props.fallbackText || props.name.slice(0, 1).toU
     :width="size"
     :height="size"
     class="shrink-0 object-contain"
-    :style="{ width: `${size}px`, height: `${size}px` }"
+    :style="{ width: `${size}px`, height: `${size}px`, maxWidth: '100%', maxHeight: '100%' }"
     @error="imageFailed = true"
   >
   <svg

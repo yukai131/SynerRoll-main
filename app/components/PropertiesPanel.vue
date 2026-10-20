@@ -3,6 +3,7 @@ import { MarkerType } from '@vue-flow/core'
 import { componentDefinitionMap } from '~~/config/component-meta'
 import type { ConfigField, LayerConfig, LayerStatus, PrimitiveValue } from '~~/types/component'
 import type { BoundaryItem } from '~~/types/boundary'
+import { meaningMatchesBoundaryKey } from '~~/types/boundary'
 import type { FittingModel } from '~~/types/fitting'
 import type { CanvasData, CanvasEdgeData, CanvasNodeData, FlowEdge, FlowNode, NodePortConfig } from '~~/types/canvas'
 import { updateNodeFromFields } from '~~/utils/canvas'
@@ -139,8 +140,17 @@ const selectedNodeBoundaries = computed(() =>
 // 这样可以避免"在编辑器里选了 X，到边界页却看不到关联"的认知不一致
 const availableBoundariesForNode = computed(() => {
   const def = selectedDefinition.value
-  const acceptedMeanings = new Set<string>(def?.boundaryKey ?? [])
-  return (props.boundaries ?? []).filter(b => acceptedMeanings.has(b.meaning))
+  const all = props.boundaries ?? []
+  // 含旧版 meaning 词表兼容（other/heat/hydrogen/power）
+  const matching = all.filter(b => meaningMatchesBoundaryKey(def?.boundaryKey, b.meaning))
+  // 已选中的边界始终展示，避免 meaning 过滤把已建立的关联「显示为无」
+  const selectedIds = new Set(selectedNodeBoundaryIds.value)
+  const selected = all.filter(b => selectedIds.has(b.id))
+  const merged = [...matching]
+  for (const b of selected) {
+    if (!merged.some(item => item.id === b.id)) merged.push(b)
+  }
+  return merged
 })
 
 const tabs = computed(() => {

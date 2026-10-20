@@ -14,7 +14,8 @@ const COMPONENT_CONSTRUCTORS = Dict{String,Any}(
     "CS" => CompressedAirStorage,
     "PS" => PumpedStorage,
     "HYDRO" => HydroPower,
-    "GRID" => PowerGrid
+    "GRID" => PowerGrid,
+    "HGRID" => HydrogenGrid
 )
 
 function instantiate_component(comp_dict::Dict{String,Any})
@@ -24,7 +25,10 @@ function instantiate_component(comp_dict::Dict{String,Any})
 end
 
 # ── 松弛变量常量 ──────────────────────────────────────────────────────────
-const SLACK_PENALTY_DEFAULT = 1e6  # 默认惩罚系数（可被 algorithm 配置覆盖）
+const SLACK_SHORTAGE_PENALTY_DEFAULT = 1000.0  # 缺供惩罚（元/kWh），约 2000× 购电价
+const SLACK_EXCESS_PENALTY_DEFAULT = 50.0      # 过剩惩罚（元/kWh），明显高于运行成本但低于缺供
+# 兼容旧算法配置的单一系数；仅当未配置 shortage/excess 时回退
+const SLACK_PENALTY_DEFAULT = SLACK_SHORTAGE_PENALTY_DEFAULT
 const SLACK_BIG_M = 1e8  # 互斥约束的大 M 值
 
 """从 connection 变量名解析出 (comp_key, direction, code)，如 "E_WT_out_14a1" -> ("E_WT", :out, "14a1")"""
@@ -86,6 +90,8 @@ function get_hydrogen_model_var_base(comp_key::String, direction::Symbol)
         return direction == :in ? "H_HLOAD" : nothing
     elseif comp_key == "HS" || comp_key == "H_HS"
         return direction == :in ? "H_HS_in" : "H_HS_out"
+    elseif comp_key == "HGRID" || comp_key == "H_HGRID"
+        return direction == :in ? "H_HGRID_in" : "H_HGRID_out"
     end
     return nothing
 end
@@ -142,17 +148,26 @@ function get_hydrogen_energy_signal(comp_key::String, direction::Symbol)
         return -1.0     # 氢负荷从总线提取
     elseif comp_key == "HS" || comp_key == "H_HS"
         return direction == :in ? -1.0 : 1.0  # 充氢提取，放氢注入
+    elseif comp_key == "HGRID" || comp_key == "H_HGRID"
+        return direction == :in ? -1.0 : 1.0  # 上送/售氢提取，购入注入
     end
     error("未知的氢总线组件类型: comp_key=\"$comp_key\", direction=$direction")
 end
 
 # ── 松弛变量辅助函数 ──────────────────────────────────────────────────────
 
-"""从 algorithms 配置中读取松弛变量参数，返回 (enabled, penalty)"""
+"""从 algorithms 配置中读取松弛变量参数，返回 (enabled, shortage_penalty, excess_penalty)。
+兼容旧单一 slackPenalty：仅当未配置 shortage/excess 时两侧同用旧系数。"""
 function get_slack_config(algorithms::Dict{String,Any})
     enabled = get(algorithms, "slackEnabled", false)
-    penalty = Float64(get(algorithms, "slackPenalty", SLACK_PENALTY_DEFAULT))
-    return enabled, penalty
+    legacy = get(algorithms, "slackPenalty", nothing)
+    shortage = Float64(get(algorithms, "shortagePenalty",
+        legacy === nothing ? SLACK_SHORTAGE_PENALTY_DEFAULT : legacy))
+    excess = Float64(get(algorithms, "excessPenalty",
+        legacy === nothing ? SLACK_EXCESS_PENALTY_DEFAULT : legacy))
+    isfinite(shortage) && shortage >= 0 || error("shortagePenalty 必须是非负有限数值")
+    isfinite(excess) && excess >= 0 || error("excessPenalty 必须是非负有限数值")
+    return enabled, shortage, excess
 end
 
 """从 node 的 variables 推断总线前缀（E/H/Q）"""
@@ -169,16 +184,17 @@ function determine_bus_prefix(node::Dict{String,Any})
 end
 
 """
-    add_slack_variables!(model, tracer, prefix, bus_code, time_index; penalty)
+    add_slack_variables!(model, tracer, prefix, bus_code, time_index; shortage_penalty, excess_penalty)
 
 为能量总线创建松弛变量（SHORTAGE / EXCESS）和互斥二进制变量（γ），
 返回惩罚表达式。bus_code 为总线节点短编码，用于区分不同总线。
 
 tracer 为 nothing 时不记录代码行（非追踪模式）。
-penalty 为惩罚系数，默认使用 SLACK_PENALTY_DEFAULT。
+shortage_penalty / excess_penalty 为缺供、过剩惩罚系数（元/kWh）。
 """
 function add_slack_variables!(model, tracer::Union{CodeTracer,Nothing}, prefix::String, bus_code::String, time_index;
-    penalty::Float64=SLACK_PENALTY_DEFAULT)
+    shortage_penalty::Float64=SLACK_SHORTAGE_PENALTY_DEFAULT,
+    excess_penalty::Float64=SLACK_EXCESS_PENALTY_DEFAULT)
     suffix = isempty(bus_code) ? "" : "_$(bus_code)"
     shortage_name = "$(prefix)_SHORTAGE$(suffix)"
     excess_name = "$(prefix)_EXCESS$(suffix)"
@@ -222,11 +238,12 @@ function add_slack_variables!(model, tracer::Union{CodeTracer,Nothing}, prefix::
     end
 
     # ── 惩罚表达式 ────────────────────────────────────────────────────
-    penalty_expr = @expression(model, penalty * (sum(shortage) + sum(excess)))
+    penalty_expr = @expression(model,
+        shortage_penalty * sum(shortage) + excess_penalty * sum(excess))
     penalty_name = "C_slack_$(prefix)$(suffix)"
     if tracer !== nothing
         add_tracked_expression!(model, tracer, penalty_name,
-            "@expression(model, $(penalty_name), $(penalty) * (sum($(shortage_name)) + sum($(excess_name))))",
+            "@expression(model, $(penalty_name), $(shortage_penalty) * sum($(shortage_name)) + $(excess_penalty) * sum($(excess_name)))",
             penalty_expr; to_objective=true)
     end
 
@@ -259,7 +276,7 @@ function _build_energy_balance!(model, node::Dict{String,Any}, layer::Dict{Strin
     isempty(terms) && return nothing
 
     # 松弛变量（仅在启用时添加）
-    slack_enabled, slack_penalty = get_slack_config(algorithms)
+    slack_enabled, shortage_penalty, excess_penalty = get_slack_config(algorithms)
     prefix = determine_bus_prefix(node)
     penalty_expr = nothing
     shortage_sym = nothing
@@ -267,7 +284,7 @@ function _build_energy_balance!(model, node::Dict{String,Any}, layer::Dict{Strin
 
     if slack_enabled && prefix !== nothing
         bus_code = get(node, "busCode", "")
-        penalty_expr = add_slack_variables!(model, nothing, prefix, bus_code, time_index; penalty=slack_penalty)
+        penalty_expr = add_slack_variables!(model, nothing, prefix, bus_code, time_index; shortage_penalty, excess_penalty)
         suffix = isempty(bus_code) ? "" : "_$(bus_code)"
         shortage_sym = Symbol("$(prefix)_SHORTAGE$(suffix)")
         excess_sym = Symbol("$(prefix)_EXCESS$(suffix)")
@@ -331,7 +348,7 @@ function _build_energy_balance_tracked!(model, tracer::CodeTracer, node::Dict{St
     isempty(terms) && return nothing
 
     # 松弛变量（仅在启用时添加）
-    slack_enabled, slack_penalty = get_slack_config(algorithms)
+    slack_enabled, shortage_penalty, excess_penalty = get_slack_config(algorithms)
     prefix = determine_bus_prefix(node)
     penalty_expr = nothing
     shortage_sym = nothing
@@ -339,7 +356,7 @@ function _build_energy_balance_tracked!(model, tracer::CodeTracer, node::Dict{St
 
     if slack_enabled && prefix !== nothing
         bus_code = get(node, "busCode", "")
-        penalty_expr = add_slack_variables!(model, tracer, prefix, bus_code, time_index; penalty=slack_penalty)
+        penalty_expr = add_slack_variables!(model, tracer, prefix, bus_code, time_index; shortage_penalty, excess_penalty)
         suffix = isempty(bus_code) ? "" : "_$(bus_code)"
         shortage_sym = Symbol("$(prefix)_SHORTAGE$(suffix)")
         excess_sym = Symbol("$(prefix)_EXCESS$(suffix)")
@@ -689,12 +706,11 @@ function solve_model(model, components::Vector{<:AbstractComponent}, layer::Dict
         JuMP.optimize!(model)
     end
 
-    time_limited_feasible = allow_time_limit_solution &&
-        JuMP.termination_status(model) == MOI.TIME_LIMIT && JuMP.has_values(model) &&
-        JuMP.primal_status(model) == MOI.FEASIBLE_POINT
-    if JuMP.termination_status(model) != MOI.OPTIMAL && !time_limited_feasible
-        status = JuMP.termination_status(model)
-        primal = JuMP.primal_status(model)
+    status = JuMP.termination_status(model)
+    primal = JuMP.primal_status(model)
+    usable = status == MOI.OPTIMAL ||
+        (allow_time_limit_solution && status == MOI.TIME_LIMIT && primal == MOI.FEASIBLE_POINT)
+    if !usable
         dual = JuMP.dual_status(model)
         @error "Optimization failed. Status: $(status), primal: $(primal), dual: $(dual)"
         return nothing

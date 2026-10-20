@@ -51,6 +51,8 @@ export interface UnitOption {
 const EXTRA_VARIABLE_NAMES: Record<string, string> = {
   E_GRID_in: '购电功率',
   E_GRID_out: '上网功率',
+  H_HGRID_in: '售氢流量',
+  H_HGRID_out: '购氢流量',
   E_HYDRO: '输出功率',
   AVAILABLE_HYDRO: '可用功率',
   MINIMUM_HYDRO: '最小运行功率',

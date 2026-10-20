@@ -16,7 +16,7 @@ function resolve_chp_params(component::CombinedHeatPower, ctx::BuildContext)
         capacity=capacity,
         η_e=paras["η_e"],
         β=β,
-        ramp_ratio=paras["ramp"] * time_step_hours,
+        ramp_ratio=ramp_per_min_to_per_hour(paras["ramp"]) * time_step_hours,
         min_output_ratio=paras["min"],
         min_on_steps=Int(round(paras["T_min_on"] / time_step_hours)),
         min_off_steps=Int(round(paras["T_min_off"] / time_step_hours)),

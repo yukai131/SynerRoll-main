@@ -20,7 +20,6 @@ import {
 } from '~~/utils/display-window'
 import { useTaskApi } from '~~/composables/api/useTaskApi'
 import { useTaskWebSocket } from '~~/composables/api/useTaskWebSocket'
-import { createTaskRequestGate } from '~~/utils/task-refresh'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
 import { useToastCenter } from '~~/state/ui'
 import { parseVariableKey, getVariableDisplayName } from '~~/config/component-meta'
@@ -44,6 +43,7 @@ import DeviceOutputAnalysis from '~/components/DeviceOutputAnalysis.vue'
 import FlexibilityDemandComparisonModal from '~/components/FlexibilityDemandComparisonModal.vue'
 import PieChart from '~/components/PieChart.vue'
 import ResultChartsSkeleton from '~/components/ResultChartsSkeleton.vue'
+import { getDeviceColor, getLayerColor } from '~~/config/device-colors'
 
 definePageMeta({ title: '结果分析 - SynerRoll' })
 
@@ -73,7 +73,6 @@ const sections: AnalysisSection[] = [
   { key: 'energy-flow', label: '能流平衡分析', icon: '' },
   { key: 'device-output', label: '设备出力分析', icon: '' },
   { key: 'economy', label: '经济性分析', icon: '' },
-  { key: 'stability', label: '稳定性分析', icon: '' },
   { key: 'flexibility', label: '系统灵活性量化评估', icon: '' },
   { key: 'device-flexibility', label: '设备灵活性量化评估', icon: '' },
 ]
@@ -83,7 +82,6 @@ const activeSection = ref<string>('overview')
 // ───── 当前选中的任务 ─────
 const selectedTaskId = ref<string | null>(null)
 const selectedTask = ref<ComputeTask | null>(null)
-let selectedTaskGeneration = 0
 /** 创建后立刻出壳，后台补齐项目/灵活性 */
 const resultShellLoading = ref(false)
 const currentProject = ref<Project | null>(null)
@@ -143,14 +141,11 @@ const connectionData = ref<BusConnection[]>([])
 const energyFlowDisplayMode = ref<EnergyFlowDisplayMode>('balance')
 
 const loadConnectionData = async (taskId: string) => {
-  const selection = selectedTaskGeneration
   try {
     const res = await taskApi.getConnection(taskId)
-    if (selection !== selectedTaskGeneration) return
     connectionData.value = Array.isArray(res) ? res : []
   }
   catch (e) {
-    if (selection !== selectedTaskGeneration) return
     console.warn('[EnergyFlow] loadConnectionData error:', e)
     connectionData.value = []
   }
@@ -240,7 +235,7 @@ function getChartDeviceColorKey(key: string): string {
 
 // ───── 数据轮询 ─────
 let wsHandle: { close: () => void; send: (m: object) => void } | null = null
-const liveData = shallowRef<Record<string, Record<string, { ts: string; value: number }[]>>>({})
+const liveData = ref<Record<string, Record<string, { ts: string; value: number }[]>>>({})
 const liveDataUnits = ref<Record<string, string>>({})
 /** 全局版本：liveData 整体替换时的信号（能流/设备出力等） */
 const liveDataVersion = ref(0)
@@ -248,7 +243,7 @@ const liveDataVersion = ref(0)
 const liveDataVersions = ref<Record<string, number>>({})
 const liveDataMaxMinutes = ref(0)
 const liveStatus = ref<string>('')
-const flexibilityData = shallowRef<TaskFlexibilityResponse | null>(null)
+const flexibilityData = ref<TaskFlexibilityResponse | null>(null)
 const flexibilityLoading = ref(false)
 const flexibilityError = ref('')
 
@@ -260,20 +255,6 @@ const economySelectedLayer = ref<string>('')
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let pollingGeneration = 0
-const resultRequests = createTaskRequestGate()
-const liveResultCursor = ref(0)
-let liveHasMore = false
-let liveReadSucceeded = false
-let flexRevision = 0
-let flexVersioned = false
-const flexPeriodIndex = new Map<string, number>()
-let flexPeriodRows: Array<Record<string, unknown>> = []
-let flexFlushTimer: ReturnType<typeof setTimeout> | null = null
-let pendingFlexEvents: Array<{ revision: number; rows: Array<Record<string, unknown>> }> = []
-let lastFlexEventAt = 0
-const flexCommitTimes = new Map<number, number>()
-let boundaryLoadedRange: { start: number; end: number } | null = null
-let boundaryTimer: ReturnType<typeof setTimeout> | null = null
 
 const flexibilityConfig = computed<FlexibilityTaskConfig | null>(() => {
   const config = flexibilityData.value?.config
@@ -409,7 +390,8 @@ const DEVICE_TYPE_LABELS: Record<string, string> = {
   CS: '压缩空气储能',
   PS: '抽水蓄能',
   HYDRO: '常规水电',
-  GRID: '电网'
+  GRID: '电网',
+  HGRID: '氢网'
 }
 
 const deviceFlexibilityGroups = computed<DeviceFlexibilityGroup[]>(() => {
@@ -502,88 +484,67 @@ function flexPeriodKey(row: Record<string, unknown>): string {
 }
 
 function mergeFlexibilityPeriods(
+  existing: Array<Record<string, unknown>> | undefined,
   incoming: Array<Record<string, unknown>> | undefined
 ): Array<Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>()
+  for (const row of existing ?? []) {
+    map.set(flexPeriodKey(row), row)
+  }
   for (const row of incoming ?? []) {
-    const key = flexPeriodKey(row)
-    const index = flexPeriodIndex.get(key)
-    if (index === undefined) {
-      flexPeriodIndex.set(key, flexPeriodRows.length)
-      flexPeriodRows.push(row)
-    } else flexPeriodRows[index] = row
+    map.set(flexPeriodKey(row), row)
     const tsMin = Number(row.timestamp_minutes)
     const tsLabel = String(row.timestamp ?? '')
     const m = Number.isFinite(tsMin) && tsMin > 0 ? tsMin : timeLabelToMinutes(tsLabel)
     if (Number.isFinite(m) && m > flexMaxMinutes) flexMaxMinutes = m
   }
-  return flexPeriodRows.slice()
+  return [...map.values()]
 }
 
-const reloadFlexibility = (taskId: string, options: { silent?: boolean } = {}) => {
-  const generation = pollingGeneration
-  return resultRequests.run('flex|' + taskId + '|' + generation, async () => {
-    const current = () => selectedTaskId.value === taskId && generation === pollingGeneration
-    if (!current()) return
-    if (!options.silent) { flexibilityLoading.value = true; flexibilityError.value = '' }
-    const t0 = performance.now()
-    try {
-      const data = await taskApi.getFlexibility(taskId, undefined, undefined,
-        flexHistoryLoaded && flexVersioned ? flexRevision : undefined)
-      if (!current() || (data.versioned && (data.revision ?? 0) < flexRevision)) return
-      if (data.reset) { flexPeriodIndex.clear(); flexPeriodRows = []; flexMaxMinutes = 0 }
-      const incoming = data.periods as unknown as Array<Record<string, unknown>>
-      const periods = incoming.length || data.reset
-        ? mergeFlexibilityPeriods(incoming)
-        : flexibilityData.value?.periods ?? []
-      const summariesChanged = JSON.stringify(data.summaries) !== JSON.stringify(flexibilityData.value?.summaries)
-      flexRevision = data.revision ?? 0
-      flexVersioned = data.versioned === true
-      if (!flexibilityData.value || incoming.length || data.reset || summariesChanged) {
-        flexibilityData.value = { ...data, periods } as TaskFlexibilityResponse
-      }
-      flexHistoryLoaded = true
-      flexibilityError.value = ''
-      if (data.probe) probeAcc.lastFlexProbe = data.probe as Record<string, number | string>
-      flushFlexibilityEvents(taskId)
-    } catch (error) {
-      if (!current()) return
+const reloadFlexibility = async (taskId: string, options: { silent?: boolean } = {}) => {
+  if (!options.silent) {
+    flexibilityLoading.value = true
+    flexibilityError.value = ''
+  }
+  const t0 = performance.now()
+  try {
+    // 首次拉全量 periods；之后按 flexMaxMinutes 增量，前端 merge 保留历史
+    const minMinutes = flexHistoryLoaded && flexMaxMinutes > 0
+      ? Math.max(0, flexMaxMinutes - 24 * 60)
+      : undefined
+    const data = await taskApi.getFlexibility(taskId, undefined, minMinutes)
+    if (selectedTaskId.value !== taskId) return
+    const mergedPeriods = mergeFlexibilityPeriods(
+      flexibilityData.value?.periods as Array<Record<string, unknown>> | undefined,
+      (data as { periods?: Array<Record<string, unknown>> }).periods
+    )
+    flexibilityData.value = {
+      ...(data as Record<string, unknown>),
+      periods: mergedPeriods,
+      summaries: (data as { summaries?: unknown[] }).summaries
+        ?? flexibilityData.value?.summaries
+        ?? [],
+    } as typeof flexibilityData.value
+    flexHistoryLoaded = true
+    flexibilityError.value = ''
+    const fp = (data as { probe?: Record<string, number | string> })?.probe
+    if (fp) probeAcc.lastFlexProbe = fp
+  }
+  catch (error) {
+    if (selectedTaskId.value !== taskId) return
+    if (!options.silent || !flexibilityData.value) {
+      flexibilityData.value = null
       flexibilityError.value = error instanceof Error ? error.message : String(error)
-      console.warn('[Poll] reloadFlexibility error:', error)
-    } finally {
-      probeAcc.flexMs += performance.now() - t0
-      if (current()) flexibilityLoading.value = false
     }
-  })
-}
-
-/** WS 直接使用已提交的变化点；版本缺口交给只读增量接口补齐。 */
-function flushFlexibilityEvents(taskId: string): void {
-  if (selectedTaskId.value !== taskId || !pendingFlexEvents.length) return
-  if (!flexHistoryLoaded || !flexVersioned) {
-    void reloadFlexibility(taskId, { silent: true })
-    return
+    else {
+      console.warn('[Poll] reloadFlexibility error:', error)
+    }
   }
-  pendingFlexEvents.sort((a, b) => a.revision - b.revision)
-  const rows: Array<Record<string, unknown>> = []
-  let nextRevision = flexRevision
-  const remaining: typeof pendingFlexEvents = []
-  for (const event of pendingFlexEvents) {
-    if (event.revision <= nextRevision) continue
-    if (event.revision !== nextRevision + 1) { remaining.push(event); continue }
-    rows.push(...event.rows)
-    nextRevision = event.revision
-  }
-  pendingFlexEvents = remaining
-  if (rows.length && flexibilityData.value) {
-    const periods = mergeFlexibilityPeriods(rows)
-    flexRevision = nextRevision
-    flexibilityData.value = { ...flexibilityData.value, periods, revision: flexRevision } as TaskFlexibilityResponse
-  }
-  if (remaining.length && !flexFlushTimer) {
-    flexFlushTimer = setTimeout(() => {
-      flexFlushTimer = null
-      if (selectedTaskId.value === taskId) void reloadFlexibility(taskId, { silent: true })
-    }, 500)
+  finally {
+    probeAcc.flexMs += performance.now() - t0
+    if (!options.silent && selectedTaskId.value === taskId) {
+      flexibilityLoading.value = false
+    }
   }
 }
 
@@ -595,6 +556,8 @@ const COST_TYPE_COLORS: Record<string, string> = {
   cut_cost: '#ef4444',
   purchase_cost: '#06b6d4',
   sell_revenue: '#10b981',
+  hydrogen_purchase_cost: '#0d9488',
+  hydrogen_sell_revenue: '#14b8a6',
   shortage_penalty: '#f97316',
   excess_penalty: '#ec4899',
 }
@@ -607,6 +570,8 @@ const COST_TYPE_LABELS: Record<string, string> = {
   cut_cost: '弃风/弃光成本',
   purchase_cost: '购电成本',
   sell_revenue: '售电收益',
+  hydrogen_purchase_cost: '购氢成本',
+  hydrogen_sell_revenue: '售氢收益',
   shortage_penalty: '短缺惩罚',
   excess_penalty: '过剩惩罚',
 }
@@ -619,10 +584,15 @@ const economySelectedLayerSummary = computed(() => {
 
 const economyMetrics = computed(() => economyData.value?.metrics ?? null)
 
+/** 金额：千分位，¥ 与逗号后加细空格提升可读性 */
 const formatMoney = (v: unknown, digits = 2): string => {
   const n = Number(v)
   if (!Number.isFinite(n)) return '--'
-  return n.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+  const s = n.toLocaleString('zh-CN', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  })
+  return '¥\u2009' + s.replace(/,/g, ',\u2009')
 }
 
 const formatDays = (v: unknown): string => {
@@ -633,36 +603,62 @@ const formatDays = (v: unknown): string => {
   return `${(n * 24).toFixed(1)} 小时`
 }
 
+/** 设备展示名：优先后端 componentName，其次画布节点名，最后回退 compKey */
+const economyCompDisplayNames = computed(() => {
+  const map: Record<string, string> = {}
+  for (const item of economyData.value?.allCostItems ?? []) {
+    const key = `${item.componentType}_${item.componentId}`
+    if (!map[key] && item.componentName) map[key] = item.componentName
+    else if (!map[key] && item.componentId && codeToLabel.value[item.componentId]) {
+      map[key] = codeToLabel.value[item.componentId]!
+    }
+  }
+  return map
+})
+
+const economyCompDisplayName = (compKey: string): string => {
+  return economyCompDisplayNames.value[compKey] || compKey
+}
+
 const economyLayerPieItems = computed(() => {
   if (!economyData.value?.allCostItems?.length) return {}
   const result: Record<string, Array<{ label: string; value: number; color: string }>> = {}
-  for (const item of economyData.value.allCostItems) {
-    if (item.isSlack || Math.abs(item.value) < 0.01) continue
+  const visible = economyData.value.allCostItems.filter(item => !item.isSlack && Math.abs(item.value) >= 0.01)
+  const countByComp: Record<string, number> = {}
+  for (const item of visible) {
+    const key = `${item.componentType}_${item.componentId}`
+    countByComp[key] = (countByComp[key] ?? 0) + 1
+  }
+  const indexByComp: Record<string, number> = {}
+  for (const item of visible) {
     if (!result[item.layerId]) result[item.layerId] = []
+    const compKey = `${item.componentType}_${item.componentId}`
+    const idx = indexByComp[compKey] ?? 0
+    indexByComp[compKey] = idx + 1
+    const baseColor = getDeviceColor(item.componentType, item.componentId)
+    const color = (countByComp[compKey] ?? 1) > 1
+      ? getLayerColor(baseColor, idx, countByComp[compKey]!)
+      : baseColor
     const label = item.componentName
       ? `${item.componentName} - ${item.costLabel}`
-      : `${item.componentType}_${item.componentId} - ${item.costLabel}`
+      : `${item.componentType} - ${item.costLabel}`
     result[item.layerId]!.push({
       label,
       value: Math.abs(item.value),
-      color: COST_TYPE_COLORS[item.costType] ?? '#6b7280',
+      color,
     })
   }
   return result
 })
 
-const reloadEconomy = (taskId: string, options: { silent?: boolean } = {}) => {
-  const generation = pollingGeneration
-  return resultRequests.run('economy|' + taskId + '|' + generation, async () => {
-  const t0 = performance.now()
-  if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
+const reloadEconomy = async (taskId: string, options: { silent?: boolean } = {}) => {
   if (!options.silent) {
     economyLoading.value = true
     economyError.value = ''
   }
   try {
     const data = await taskApi.getEconomy(taskId)
-    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
+    if (selectedTaskId.value !== taskId) return
     economyData.value = data
     economyError.value = ''
     if (!economySelectedLayer.value && data.layers?.length) {
@@ -670,7 +666,7 @@ const reloadEconomy = (taskId: string, options: { silent?: boolean } = {}) => {
     }
   }
   catch (error) {
-    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
+    if (selectedTaskId.value !== taskId) return
     if (!options.silent || !economyData.value) {
       economyData.value = null
       economyError.value = error instanceof Error ? error.message : String(error)
@@ -680,12 +676,10 @@ const reloadEconomy = (taskId: string, options: { silent?: boolean } = {}) => {
     }
   }
   finally {
-    probeAcc.econMs += performance.now() - t0
-    if (!options.silent && selectedTaskId.value === taskId && generation === pollingGeneration) {
+    if (!options.silent && selectedTaskId.value === taskId) {
       economyLoading.value = false
     }
   }
-  })
 }
 
 // ───── 轮询性能探测 ─────
@@ -698,33 +692,14 @@ const probeAcc = {
   econMs: 0,
   cycleMs: 0,
   rows: 0,
-  sentCursor: 0,
+  sentMinMinutes: -1,
   taskHead: -1,
+  stalePolls: 0,
   stateMs: 0,
   lastProbe: null as null | Record<string, number | string>,
   lastFlexProbe: null as null | Record<string, number | string>,
   lastLogAt: 0,
-  renderedCharts: 0,
-  renderPrepareMs: 0,
-  renderPaintMaxMs: 0,
-  paintedCursor: 0,
-  flexPaintedRevision: 0,
-  commitToPaintMaxMs: 0,
 }
-const onChartRendered = (event: Event) => {
-  const detail = (event as CustomEvent<{ prepareMs: number; paintMs: number; version: number; channel: string }>).detail
-  probeAcc.renderedCharts++
-  probeAcc.renderPrepareMs += detail.prepareMs
-  probeAcc.renderPaintMaxMs = Math.max(probeAcc.renderPaintMaxMs, detail.paintMs)
-  if (detail.channel === 'series') probeAcc.paintedCursor = Math.max(probeAcc.paintedCursor, detail.version)
-  else {
-    probeAcc.flexPaintedRevision = Math.max(probeAcc.flexPaintedRevision, detail.version)
-    const committedAt = flexCommitTimes.get(detail.version)
-    if (committedAt) probeAcc.commitToPaintMaxMs = Math.max(probeAcc.commitToPaintMaxMs, Date.now() - committedAt)
-  }
-}
-onMounted(() => window.addEventListener('synerroll:chart-render', onChartRendered))
-onBeforeUnmount(() => window.removeEventListener('synerroll:chart-render', onChartRendered))
 const probeLog = (force = false) => {
   const now = performance.now()
   if (!force && now - probeAcc.lastLogAt < 2000) return
@@ -739,22 +714,23 @@ const probeLog = (force = false) => {
     ` | econ_avg=${(probeAcc.econMs / n).toFixed(0)}ms` +
     ` | cycle_avg=${(probeAcc.cycleMs / n).toFixed(0)}ms` +
     ` | rows_last=${probeAcc.rows}` +
-    ` | bff_query=${p.query_ms ?? '-'}ms` +
-    ` | bff_build=${p.build_ms ?? '-'}ms` +
-    ` | bff_total=${p.total_ms ?? '-'}ms` +
+    ` | julia_lock=${p.lock_wait_ms ?? '-'}ms` +
+    ` | julia_query=${p.query_ms ?? '-'}ms` +
+    ` | julia_build=${p.build_ms ?? '-'}ms` +
+    ` | julia_ser=${p.serialize_est_ms ?? '-'}ms` +
+    ` | julia_total=${p.total_ms ?? '-'}ms` +
+    ` | bff=${p.bff_total_ms ?? '-'}ms` +
     ` | series=${p.series_count ?? '-'}` +
     ` | raw_pts=${p.raw_point_count ?? '-'}` +
     ` | flex_parse=${fp.period_parse_ms ?? '-'}ms` +
     ` | flex_n=${fp.period_count ?? '-'}` +
-    ` | cursor_sent=${probeAcc.sentCursor}` +
+    ` | minMin_sent=${probeAcc.sentMinMinutes}` +
+    ` | minMin_srv=${p.min_minutes ?? '-'}` +
     ` | taskHead=${probeAcc.taskHead}` +
+    ` | stale=${probeAcc.stalePolls}` +
     ` | cur_time=${selectedTask.value?.cur_time ?? 'null'}` +
     ` | maxDevTs=${p.max_device_ts ?? '-'}` +
     ` | state_avg=${(probeAcc.stateMs / n).toFixed(0)}ms`
-    + ` | cursor_applied=${liveResultCursor.value} | cursor_painted=${probeAcc.paintedCursor}`
-    + ` | charts=${probeAcc.renderedCharts} | chart_prepare_avg=${(probeAcc.renderPrepareMs / Math.max(1, probeAcc.renderedCharts)).toFixed(0)}ms`
-    + ` | chart_finish_max=${probeAcc.renderPaintMaxMs.toFixed(0)}ms | flex_revision=${flexRevision}`
-    + ` | flex_painted=${probeAcc.flexPaintedRevision} | commit_to_paint_max=${probeAcc.commitToPaintMaxMs.toFixed(0)}ms`
   )
   probeAcc.cycles = 0
   probeAcc.getDataMs = 0
@@ -763,10 +739,6 @@ const probeLog = (force = false) => {
   probeAcc.econMs = 0
   probeAcc.cycleMs = 0
   probeAcc.stateMs = 0
-  probeAcc.renderedCharts = 0
-  probeAcc.renderPrepareMs = 0
-  probeAcc.renderPaintMaxMs = 0
-  probeAcc.commitToPaintMaxMs = 0
   probeAcc.lastLogAt = now
 }
 
@@ -794,6 +766,10 @@ function simHeadFromTask(): number {
 }
 
 /** stale 只看任务 cur_time；maxDevTs 会超前，不能当水位 */
+let staleHeadPolls = 0
+let lastTaskHead = 0
+let lastHeadChangeAt = 0
+let loadedBoundaryOnce = false
 
 
 /** 合并 rows 到 liveData（WS 推送与 getData 共用） */
@@ -856,9 +832,15 @@ function applyLiveRows(rows: Array<{
         idxMap.set(ts, arr.length)
         arr.push(point)
       } else {
-        // 本批先追加，批末一次排序；中途 splice 会使 ts→index 失效。
-        idxMap.set(ts, arr.length)
-        arr.push(point)
+        let lo = 0
+        let hi = arr.length
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (timeLabelToMinutes(arr[mid]!.ts) < m) lo = mid + 1
+          else hi = mid
+        }
+        arr.splice(lo, 0, point)
+        idxMap.set(ts, lo)
         needsSort.add(slot)
       }
     }
@@ -896,7 +878,7 @@ function applyLiveRows(rows: Array<{
     const lid = slot.slice(sepPos + 1)
     const arr = merged[key]?.[lid]
     if (!arr) continue
-    next[key] = { ...next[key], [lid]: arr }
+    next[key] = { ...next[key], [lid]: [...arr] }
   }
   liveData.value = next
   if (unitsChanged) liveDataUnits.value = { ...units }
@@ -908,95 +890,65 @@ function applyLiveRows(rows: Array<{
   liveDataVersion.value++
 }
 
-const reloadLiveData = (taskId: string) => {
-  const generation = pollingGeneration
-  return resultRequests.run('live|' + taskId + '|' + generation, async () => {
-    if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
-    const t0 = performance.now()
-    const sentCursor = liveResultCursor.value
-    probeAcc.sentCursor = sentCursor
-    liveReadSucceeded = false
-    try {
-      const data = await taskApi.getData(taskId, { afterId: sentCursor, skipBoundary: true, limit: 20000 })
-      if (selectedTaskId.value !== taskId || generation !== pollingGeneration) return
-      const t1 = performance.now()
-      liveReadSucceeded = true
-      probeAcc.getDataMs += t1 - t0
-      if ((data.latestCursor ?? sentCursor) < sentCursor) {
-        liveResultCursor.value = 0
-        liveDataIndex.clear()
-        liveData.value = {}
-        boundaryLoadedRange = null
-        liveHasMore = true
-        return
-      }
-      probeAcc.rows = data.rows.length
-      probeAcc.lastProbe = (data.probe ?? null) as Record<string, number | string> | null
-      probeAcc.taskHead = simHeadFromTask()
-      liveHasMore = data.hasMore === true
-      if (data.rows.length) applyLiveRows(data.rows)
-      liveResultCursor.value = data.cursor ?? sentCursor
-      probeAcc.mergeMs += performance.now() - t1
-    } catch (error) {
-      probeAcc.getDataMs += performance.now() - t0
-      console.warn('[Poll] reloadLiveData error:', error)
+const reloadLiveData = async (taskId: string) => {
+  const t0 = performance.now()
+  try {
+    const statusNow = liveStatus.value || selectedTask.value?.status || ''
+    const running = ['pending', 'parsing', 'building', 'solving'].includes(statusNow)
+    const taskHead = simHeadFromTask()
+
+    // 仅当 taskHead 在较长时间内不动才算 stale（不能每 200ms 轮询就 +1）
+    const nowMs = performance.now()
+    if (taskHead > lastTaskHead) {
+      staleHeadPolls = 0
+      lastTaskHead = taskHead
+      lastHeadChangeAt = nowMs
     }
-  })
-}
-
-/** 边界只读取当前总览窗口；大范围分成 48h 小批次，数据保留在内存中可回看。 */
-const reloadBoundaryWindow = (taskId: string) => {
-  const generation = pollingGeneration
-  return resultRequests.run('boundary|' + taskId + '|' + generation, async () => {
-    const current = () => selectedTaskId.value === taskId && generation === pollingGeneration
-      && activeSection.value === 'overview'
-    while (current()) {
-      const start = Math.max(0, Math.floor(overviewDisplayWindow.value.start))
-      const end = Math.max(start + 1, Math.ceil(overviewDisplayWindow.value.end))
-      const loaded = boundaryLoadedRange
-      if (loaded && start >= loaded.start && end <= loaded.end) return
-      let from = start
-      let to = Math.min(end, from + 48 * 60)
-      if (loaded && start < loaded.end && end > loaded.start) {
-        if (start < loaded.start) to = Math.min(loaded.start, from + 48 * 60)
-        else { from = loaded.end; to = Math.min(end, from + 48 * 60) }
-      }
-      const data = await taskApi.getData(taskId, { boundaryOnly: true, minMinutes: from, maxMinutes: to })
-      if (!current()) return
-      // 建库/注入期间空结果不能标记为已加载，下一拍会重试。
-      if (!data.rows.length) return
-      applyLiveRows(data.rows)
-      boundaryLoadedRange = loaded && from <= loaded.end && to >= loaded.start
-        ? { start: Math.min(from, loaded.start), end: Math.max(to, loaded.end) }
-        : { start: from, end: to }
-      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    else if (running && nowMs - lastHeadChangeAt > 3000) {
+      staleHeadPolls = Math.min(staleHeadPolls + 1, 2)
     }
-  }).catch(error => console.warn('[Poll] boundary window error:', error))
-}
 
-function scheduleBoundaryWindow(): void {
-  if (boundaryTimer) clearTimeout(boundaryTimer)
-  const taskId = selectedTaskId.value
-  if (!taskId || activeSection.value !== 'overview') return
-  boundaryTimer = setTimeout(() => {
-    boundaryTimer = null
-    void reloadBoundaryWindow(taskId)
-  }, 250)
+    // 拉取窗口跟仿真进度 cur_time，而不是 max(ts)。
+    // 时层1会超前写出很长视野，若用 max(ts) 当水位会切掉细层进度点，前端就不刷新。
+    const head = taskHead
+    // 首次拉全量含边界；之后始终 skipBoundary
+    // stale 时只放宽到 48h，避免 7 天窗导致 rows 暴涨
+    const wideWindow = running && staleHeadPolls >= 2
+    const lookbackMin = wideWindow ? 48 * 60 : 24 * 60
+    const minMinutes = head > 0 ? Math.max(0, head - lookbackMin) : undefined
+    const skipBoundary = loadedBoundaryOnce
+    probeAcc.sentMinMinutes = minMinutes ?? -1
+    probeAcc.taskHead = taskHead
+    probeAcc.stalePolls = staleHeadPolls
+    const data = await taskApi.getData(taskId, {
+      ...(minMinutes !== undefined ? { minMinutes } : {}),
+      ...(skipBoundary ? { skipBoundary: true } : {}),
+    })
+    loadedBoundaryOnce = true
+    const t1 = performance.now()
+    probeAcc.getDataMs += t1 - t0
+    const rows = data?.rows ?? []
+    probeAcc.rows = rows.length
+    probeAcc.lastProbe = (data as { probe?: Record<string, number | string> })?.probe ?? null
+    if (rows.length) {
+      applyLiveRows(rows as any)
+    }
+    probeAcc.mergeMs += performance.now() - t1
+  }
+  catch (e) {
+    probeAcc.getDataMs += performance.now() - t0
+    console.warn('[Poll] reloadLiveData error:', e)
+  }
 }
-
-watch([selectedTaskId, activeSection, () => overviewDisplayWindow.value.start,
-  () => overviewDisplayWindow.value.end], scheduleBoundaryWindow)
 
 const startPolling = (taskId: string) => {
   stopPolling()
   liveDataMaxMinutes.value = 0
   simHeadMinutes = 0
-  liveResultCursor.value = 0
-  probeAcc.paintedCursor = 0
-  probeAcc.flexPaintedRevision = 0
-  flexCommitTimes.clear()
-  liveHasMore = false
-  boundaryLoadedRange = null
+  staleHeadPolls = 0
+  lastTaskHead = 0
+  lastHeadChangeAt = 0
+  loadedBoundaryOnce = false
   liveDataIndex.clear()
   liveData.value = {}
   liveDataUnits.value = {}
@@ -1004,13 +956,6 @@ const startPolling = (taskId: string) => {
   liveDataVersion.value++
   flexHistoryLoaded = false
   flexMaxMinutes = 0
-  flexRevision = 0
-  flexVersioned = false
-  flexPeriodIndex.clear()
-  flexPeriodRows = []
-  pendingFlexEvents = []
-  lastFlexEventAt = 0
-  scheduleBoundaryWindow()
   const generation = pollingGeneration
   let pending = false
   let lastFlexAt = 0
@@ -1039,21 +984,24 @@ const startPolling = (taskId: string) => {
       : Promise.resolve(selectedTask.value)
     const liveP = reloadLiveData(taskId)
     const now = performance.now()
-    const flexInterval = ['flexibility', 'device-flexibility'].includes(activeSection.value) ? 5000 : 15000
-    if (now - lastFlexAt >= flexInterval && now - lastFlexEventAt > 10000) {
+    const flexInterval = ['flexibility', 'device-flexibility'].includes(activeSection.value) ? 2000 : 5000
+    if (now - lastFlexAt >= flexInterval) {
       lastFlexAt = now
       void reloadFlexibility(taskId, { silent: true })
     }
     // 经济性评价支持运行中动态刷新；节流约 2s，避免每次 200ms 轮询都扫库
     const nowEcon = performance.now()
     const econInterval = 2000
-    if (activeSection.value === 'economy' && nowEcon - lastEconAt >= econInterval) {
-      lastEconAt = nowEcon
-      void reloadEconomy(taskId, { silent: true })
-    }
+    const econP = (nowEcon - lastEconAt >= econInterval)
+      ? (async () => {
+          lastEconAt = nowEcon
+          const t = performance.now()
+          await reloadEconomy(taskId, { silent: true })
+          probeAcc.econMs += performance.now() - t
+        })()
+      : Promise.resolve()
     const st = await stateP
-    await liveP
-    scheduleBoundaryWindow()
+    await Promise.all([liveP, econP])
     probeAcc.cycleMs += performance.now() - t0
     probeAcc.cycles += 1
     probeLog()
@@ -1067,11 +1015,7 @@ const startPolling = (taskId: string) => {
     try {
       const task = await reloadResults()
       if (task && ['completed', 'failed', 'cancelled'].includes(task.status)) {
-        // 本轮状态与数据并行读取，数据快照可能早于最终提交；终态后再排空一次。
-        await reloadLiveData(taskId)
-        if (liveHasMore || !liveReadSucceeded) return
-        await reloadFlexibility(taskId, { silent: true })
-        if (activeSection.value === 'economy') void reloadEconomy(taskId, { silent: true })
+        await reloadResults()
         probeLog(true)
         shouldStop = true
         return
@@ -1082,7 +1026,7 @@ const startPolling = (taskId: string) => {
       pending = false
       if (!shouldStop && generation === pollingGeneration && selectedTaskId.value === taskId) {
         // 固定 1s 节拍：本拍内攒齐增量再画；后端慢则自然变成 2~3s 一跳
-        const delay = liveHasMore ? 0 : Math.max(0, 1000 - (performance.now() - t0))
+        const delay = Math.max(0, 1000 - (performance.now() - t0))
         refreshTimer = setTimeout(poll, delay)
       }
     }
@@ -1092,11 +1036,6 @@ const startPolling = (taskId: string) => {
 
 const stopPolling = () => {
   pollingGeneration += 1
-  if (boundaryTimer) clearTimeout(boundaryTimer)
-  boundaryTimer = null
-  if (flexFlushTimer) clearTimeout(flexFlushTimer)
-  flexFlushTimer = null
-  pendingFlexEvents = []
   if (refreshTimer) {
     clearTimeout(refreshTimer)
     refreshTimer = null
@@ -1128,29 +1067,7 @@ const subscribeTask = (taskId: string) => {
         selectedTask.value = { ...selectedTask.value, status: evt.status as ComputeTask['status'] }
       }
     }
-    else if (evt.type === 'flexibility') {
-      if (selectedTaskId.value !== taskId) return
-      lastFlexEventAt = performance.now()
-      if (evt.revision === undefined) {
-        if (!flexFlushTimer) flexFlushTimer = setTimeout(() => {
-          flexFlushTimer = null
-          void reloadFlexibility(taskId, { silent: true })
-        }, 1000)
-        return
-      }
-      pendingFlexEvents.push({ revision: evt.revision, rows: evt.rows })
-      if (evt.committedAtMs) {
-        flexCommitTimes.set(evt.revision, evt.committedAtMs)
-        if (flexCommitTimes.size > 64) flexCommitTimes.delete(flexCommitTimes.keys().next().value!)
-      }
-      // 长时间切后台时让补查接口恢复，避免在浏览器积压无界事件队列。
-      if (pendingFlexEvents.length > 32) pendingFlexEvents = pendingFlexEvents.slice(-32)
-      if (!flexFlushTimer) flexFlushTimer = setTimeout(() => {
-        flexFlushTimer = null
-        flushFlexibilityEvents(taskId)
-      }, 250)
-    }
-    else if (evt.type === 'flexibility_summary') {
+    else if (evt.type === 'flexibility' || evt.type === 'flexibility_summary') {
       void reloadFlexibility(taskId, { silent: true })
     }
     else if (evt.type === 'completed' || evt.type === 'failed' || evt.type === 'cancelled') {
@@ -1163,21 +1080,18 @@ const subscribeTask = (taskId: string) => {
       }
       void reloadLiveData(taskId)
       void reloadFlexibility(taskId, { silent: true })
-      // 由主轮询排空最后的增量页后停止，不能截断收尾结果。
+      stopPolling()
     }
   })
 }
 
 // ───── 加载项目详情 ─────
 const loadProject = async (projectId: string) => {
-  const selection = selectedTaskGeneration
   try {
     const res = await projectApi.getProject(projectId)
-    if (selection !== selectedTaskGeneration) return
     currentProject.value = res.project
   }
   catch (e) {
-    if (selection !== selectedTaskGeneration) return
     console.warn('[Result] loadProject error:', e)
     currentProject.value = null
   }
@@ -1185,7 +1099,6 @@ const loadProject = async (projectId: string) => {
 
 // ───── 选中任务 ─────
 const selectTask = async (taskId: string, options: { instantShell?: boolean } = {}) => {
-  const selection = ++selectedTaskGeneration
   selectedTaskId.value = taskId
   showTaskListDialog.value = false
   resultShellLoading.value = options.instantShell ?? false
@@ -1217,7 +1130,6 @@ const selectTask = async (taskId: string, options: { instantShell?: boolean } = 
 
   // 详情/项目/连接并行拉，不阻塞骨架屏
   const detailP = taskApi.getState(taskId).then((task) => {
-    if (selection !== selectedTaskGeneration) return null
     selectedTask.value = task
     return task
   }).catch((e) => {
@@ -1226,16 +1138,14 @@ const selectTask = async (taskId: string, options: { instantShell?: boolean } = 
   })
 
   void detailP.then((task) => {
-    if (selection !== selectedTaskGeneration) return
     if (task?.project_id) void loadProject(task.project_id)
-    if (activeSection.value === 'economy') void reloadEconomy(taskId, { silent: true })
+    void reloadEconomy(taskId, { silent: true })
   })
   void loadConnectionData(taskId)
   subscribeTask(taskId)
   startPolling(taskId)
   // 灵活性结果较重，后台拉；完成后再撤掉创建后的骨架遮罩
   void reloadFlexibility(taskId, { silent: true }).finally(() => {
-    if (selection !== selectedTaskGeneration) return
     resultShellLoading.value = false
   })
 }
@@ -1251,14 +1161,32 @@ watch(activeSection, (section) => {
 
 onBeforeUnmount(() => unsubscribeTask())
 
-// ───── 任务列表数据 ─────
-const { data: taskListData, refresh: refreshTaskList } = await useAsyncData<ComputeTaskListResponse>(
-  'task-list',
-  () => taskApi.listTasks()
+// ───── 任务列表数据（仅当前项目） ─────
+const route = useRoute()
+const initialProjectId = (route.query.projectId as string) || ''
+const initialCanvasId = (route.query.canvasId as string) || ''
+
+/** 本项目 id：URL 预填优先，其次已加载项目 / 选中任务 */
+const scopedProjectId = computed(() =>
+  initialProjectId || currentProject.value?.id || selectedTask.value?.project_id || ''
 )
-const taskList = computed(() => taskListData.value?.tasks ?? [])
+
+const { data: taskListData, refresh: refreshTaskList } = await useAsyncData<ComputeTaskListResponse>(
+  () => `task-list-${scopedProjectId.value || 'all'}`,
+  () => taskApi.listTasks(scopedProjectId.value ? { projectId: scopedProjectId.value } : undefined)
+)
+const taskList = computed(() => {
+  const tasks = taskListData.value?.tasks ?? []
+  const pid = scopedProjectId.value
+  return pid ? tasks.filter(t => t.project_id === pid) : tasks
+})
 
 const refreshList = async () => { await refreshTaskList() }
+
+const openTaskList = async () => {
+  await refreshList()
+  showTaskListDialog.value = true
+}
 
 // ───── 状态展示辅助 ─────
 const STATUS_LABEL: Record<string, string> = {
@@ -1311,9 +1239,6 @@ const doAction = async (action: 'cancel' | 'cleanup', taskId: string) => {
 }
 
 // ───── 新建任务 ─────
-const route = useRoute()
-const initialProjectId = (route.query.projectId as string) || ''
-const initialCanvasId = (route.query.canvasId as string) || ''
 
 type FlexibilityValueMode = 'constant' | 'manual' | 'file' | 'boundary'
 
@@ -1950,18 +1875,20 @@ const createTask = async () => {
       >← 返回</button>
       <h1 class="ml-4 text-base font-medium">结果分析</h1>
       <div class="ml-auto flex items-center gap-2">
-        <AppButton
-          label="任务列表"
-          tone="neutral"
-          size="sm"
-          @click="showTaskListDialog = true"
-        />
-        <AppButton
-          label="新建任务"
-          tone="neutral"
-          size="sm"
+        <button
+          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-white transition hover:bg-white/10"
+          type="button"
+          @click="openTaskList"
+        >
+          📋 任务列表
+        </button>
+        <button
+          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-xs font-medium text-white transition hover:bg-white/30"
+          type="button"
           @click="showCreateDialog = true"
-        />
+        >
+          ➕ 新建任务
+        </button>
       </div>
     </header>
 
@@ -1991,7 +1918,7 @@ const createTask = async () => {
         <!-- 未选中任务 -->
         <div v-if="!selectedTask" class="flex-1 flex flex-col items-center justify-center text-app-muted text-sm gap-4">
           <div>请先选择一个计算任务</div>
-          <AppButton label="选择任务" tone="primary" size="sm" @click="showTaskListDialog = true" />
+          <AppButton label="选择任务" tone="primary" @click="openTaskList" />
         </div>
 
         <!-- 已选中任务 -->
@@ -2047,7 +1974,6 @@ const createTask = async () => {
                 <TaskSeriesChart
                   :layers="layers"
                   :data-version="liveDataVersions[String(key)] ?? 0"
-                  :result-cursor="liveResultCursor"
                   :title="getChartDisplayName(String(key))"
                   :device-color-key="getChartDeviceColorKey(String(key))"
                   :unit="liveDataUnits[String(key)] ?? 'kW'"
@@ -2132,7 +2058,6 @@ const createTask = async () => {
 
               <div v-if="flexibilityPeriods.length" class="grid gap-3">
                 <FlexibilityRequirementSourceChart
-                  :result-revision="flexibilityData?.revision ?? 0"
                   :key="selectedTask.id"
                   :rows="flexibilityPeriods"
                   :source="flexibilityConfig.requirementSource"
@@ -2144,7 +2069,6 @@ const createTask = async () => {
                   :sim-start-date="selectedTask.sim_start_date"
                 />
                 <FlexibilitySeriesChart
-                  :result-revision="flexibilityData?.revision ?? 0"
                   :rows="flexibilityPeriods"
                   :device-labels="codeToLabel"
                   direction="up"
@@ -2156,7 +2080,6 @@ const createTask = async () => {
                   :sim-start-date="selectedTask.sim_start_date"
                 />
                 <FlexibilitySeriesChart
-                  :result-revision="flexibilityData?.revision ?? 0"
                   :rows="flexibilityPeriods"
                   :device-labels="codeToLabel"
                   direction="down"
@@ -2210,7 +2133,6 @@ const createTask = async () => {
               <DeviceFlexibilityChart
                 v-for="device in deviceFlexibilityGroups"
                 :key="device.key"
-                :result-revision="flexibilityData?.revision ?? 0"
                 :title="device.label"
                 :device-type="device.deviceType"
                 :rows="device.rows"
@@ -2267,7 +2189,6 @@ const createTask = async () => {
                       :bus-label="`${bus.busLabel} · ${layer.label}`"
                       :variables="bus.variables"
                       :live-data="liveData"
-                      :result-cursor="liveResultCursor"
                       :layer-id="layer.value"
                       :code-to-label="codeToLabel"
                       :display-mode="energyFlowDisplayMode"
@@ -2343,35 +2264,35 @@ const createTask = async () => {
                 </div>
 
                 <div v-if="economyMetrics" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">累计净成本</div>
-                    <div class="text-lg font-semibold text-app-text">¥{{ formatMoney(economyMetrics.netCost) }}</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">含售电收益抵扣</div>
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">平均净成本</div>
+                    <div class="mt-1 text-base font-semibold text-app-text">{{ formatMoney(economyMetrics.netCost) }}</div>
+                    <div class="text-xs text-app-muted mt-0.5">含售电收益抵扣</div>
                   </div>
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">日均成本</div>
-                    <div class="text-lg font-semibold text-app-text">¥{{ formatMoney(economyMetrics.dailyAvgCost) }}</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">已覆盖 {{ formatDays(economyMetrics.elapsedDays) }}</div>
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">日均成本</div>
+                    <div class="mt-1 text-base font-semibold text-app-text">{{ formatMoney(economyMetrics.dailyAvgCost) }}</div>
+                    <div class="text-xs text-app-muted mt-0.5">已覆盖 {{ formatDays(economyMetrics.elapsedDays) }}</div>
                   </div>
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">月均估算</div>
-                    <div class="text-lg font-semibold text-primary">¥{{ formatMoney(economyMetrics.monthlyEstimateCost) }}</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">日均 × 30</div>
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">月均估算</div>
+                    <div class="mt-1 text-base font-semibold text-primary">{{ formatMoney(economyMetrics.monthlyEstimateCost) }}</div>
+                    <div class="text-xs text-app-muted mt-0.5">日均 × 30</div>
                   </div>
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">年化估算</div>
-                    <div class="text-lg font-semibold text-primary">¥{{ formatMoney(economyMetrics.annualEstimateCost) }}</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">日均 × 365 · 粗估</div>
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">年化估算</div>
+                    <div class="mt-1 text-base font-semibold text-primary">{{ formatMoney(economyMetrics.annualEstimateCost) }}</div>
+                    <div class="text-xs text-app-muted mt-0.5">日均 × 365 · 粗估</div>
                   </div>
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">目标函数值</div>
-                    <div class="text-lg font-semibold text-app-text">¥{{ formatMoney(economyMetrics.objectiveValue) }}</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">不含松弛惩罚</div>
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">目标函数值</div>
+                    <div class="mt-1 text-base font-semibold text-app-text">{{ formatMoney(economyMetrics.objectiveValue) }}</div>
+                    <div class="text-xs text-app-muted mt-0.5">不含松弛惩罚</div>
                   </div>
-                  <div class="rounded-[4px] border border-app-border p-3">
-                    <div class="text-xs text-app-muted">仿真覆盖进度</div>
-                    <div class="text-lg font-semibold text-app-text">{{ ((economyMetrics.progressRatio || 0) * 100).toFixed(1) }}%</div>
-                    <div class="text-[11px] text-app-muted mt-0.5">
+                  <div class="rounded-lg bg-app-panel-soft px-3 py-3">
+                    <div class="text-sm text-app-muted">仿真覆盖进度</div>
+                    <div class="mt-1 text-base font-semibold text-app-text">{{ ((economyMetrics.progressRatio || 0) * 100).toFixed(1) }}%</div>
+                    <div class="text-xs text-app-muted mt-0.5">
                       {{ economyMetrics.coveredStart }} → {{ economyMetrics.coveredEnd }}
                     </div>
                   </div>
@@ -2379,28 +2300,28 @@ const createTask = async () => {
 
                 <!-- 分项日均/年化 -->
                 <div v-if="economyMetrics?.byCostType && Object.keys(economyMetrics.byCostType).length" class="overflow-x-auto">
-                  <table class="w-full text-xs">
+                  <table class="w-full text-sm">
                     <thead>
-                      <tr class="border-t border-app-border bg-gray-50">
-                        <th class="px-3 py-2 text-left font-medium text-app-muted">成本项</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">累计</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">日均</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">月均估算</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">年化估算</th>
+                      <tr class="border-t border-app-border bg-app-panel-soft">
+                        <th class="px-4 py-3 text-left font-medium text-app-muted">成本项</th>
+                        <th class="px-4 py-3 text-right font-medium text-app-muted">累计</th>
+                        <th class="px-4 py-3 text-right font-medium text-app-muted">日均</th>
+                        <th class="px-4 py-3 text-right font-medium text-app-muted">月均估算</th>
+                        <th class="px-4 py-3 text-right font-medium text-app-muted">年化估算</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="(m, key) in economyMetrics.byCostType" :key="key" class="border-t border-app-border">
-                        <td class="px-3 py-2">{{ COST_TYPE_LABELS[key as string] ?? key }}</td>
-                        <td class="px-3 py-2 text-right" :class="{ 'text-green-600': Number(m.total) < 0 }">¥{{ formatMoney(m.total) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ formatMoney(m.daily) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ formatMoney(m.monthly) }}</td>
-                        <td class="px-3 py-2 text-right text-primary">¥{{ formatMoney(m.annual) }}</td>
+                        <td class="px-4 py-3">{{ COST_TYPE_LABELS[key as string] ?? key }}</td>
+                        <td class="px-4 py-3 text-right" :class="{ 'text-green-600': Number(m.total) < 0 }">{{ formatMoney(m.total) }}</td>
+                        <td class="px-4 py-3 text-right">{{ formatMoney(m.daily) }}</td>
+                        <td class="px-4 py-3 text-right">{{ formatMoney(m.monthly) }}</td>
+                        <td class="px-4 py-3 text-right text-primary">{{ formatMoney(m.annual) }}</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <div v-if="economyMetrics?.note" class="text-[11px] text-app-muted">{{ economyMetrics.note }}</div>
+                <div v-if="economyMetrics?.note" class="text-xs text-app-muted">{{ economyMetrics.note }}</div>
               </div>
 
               <!-- 各时层经济性概览（纵向排列） -->
@@ -2409,74 +2330,113 @@ const createTask = async () => {
                 :key="layer.layerId"
                 class="border border-app-border bg-white p-4 space-y-4"
               >
-                <h3 class="">{{ layer.layerName }}</h3>
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <!-- 饼图：按设备-成本项分项 -->
-                  <div v-if="economyLayerPieItems[layer.layerId]?.length > 0">
-                    <PieChart
-                      title="目标函数组成"
-                      :items="economyLayerPieItems[layer.layerId]"
-                    />
-                    <div class="text-sm text-app-muted px-4">
-                      目标函数值（不含松弛惩罚）：
-                      <span class="font-semibold text-app-text">¥{{ layer.objectiveValue.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
+                  <!-- 左半区：扇形图 + 不平衡提醒 -->
+                  <div class="space-y-3">
+                    <div v-if="economyLayerPieItems[layer.layerId]?.length > 0">
+                      <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <h3 class="text-sm font-semibold text-app-text">{{ layer.layerName }} · 目标函数组成</h3>
+                        <div class="text-sm text-app-muted">
+                          目标函数值（不含松弛惩罚）：
+                          <span class="font-semibold text-app-text">{{ formatMoney(layer.objectiveValue) }}</span>
+                        </div>
+                      </div>
+                      <PieChart
+                        :items="economyLayerPieItems[layer.layerId]"
+                      />
+                    </div>
+                    <div v-else class="text-sm text-app-muted">
+                      {{ layer.layerName }} · 目标函数组成暂无数据
+                    </div>
+
+                    <!-- 松弛变量警告：放在扇形图下方 -->
+                    <div v-if="layer.hasSlack" class="border border-orange-300 bg-orange-50 p-3">
+                      <div class="flex items-center gap-2 text-orange-700 font-semibold text-sm mb-1">
+                        ⚠️ 存在能量不平衡
+                      </div>
+                      <div class="text-xs text-orange-600 space-y-1">
+                        <div v-if="(layer.slackPenalty ?? 0) > 0">
+                          松弛惩罚：{{ formatMoney(layer.slackPenalty ?? 0) }}
+                        </div>
+                        <div>说明：松弛变量大于0表示系统能量供应不平衡</div>
+                      </div>
                     </div>
                   </div>
 
-                  <!-- 松弛变量警告 -->
-                  <div v-if="layer.hasSlack" class="border border-orange-300 bg-orange-50 p-4">
-                    <div class="flex items-center gap-2 text-orange-700 font-semibold text-sm mb-2">
-                      ⚠️ 存在能量不平衡
-                    </div>
-                    <div class="text-xs text-orange-600 space-y-1">
-                      <div v-if="(layer.slackPenalty ?? 0) > 0">
-                        松弛惩罚：¥{{ (layer.slackPenalty ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}
-                      </div>
-                      <div>说明：松弛变量大于0表示系统能量供应不平衡</div>
-                    </div>
-                  </div>
-
-                  <!-- 层汇总卡片 -->
-                  <div class="bg-white space-y-3">
-                    <h3 class="bg-gray-100 p-2 text-sm text-app-text">经济性指标汇总</h3>
-                    <div class="grid grid-cols-2 gap-2 text-sm p-2">
-                      <div>
-                        <span class="text-app-muted">总成本：</span>
-                        <span class="font-medium">¥{{ (layer.totalCost ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
-                      </div>
-                      <div>
-                        <span class="text-app-muted">目标函数值：</span>
-                        <span class="font-medium">¥{{ (layer.objectiveValue ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
-                      </div>
-                    </div>
-
-                    <!-- 收益项 -->
-                    <div v-if="layer.revenueItems && Object.keys(layer.revenueItems).length > 0">
-                      <h4 class="text-xs text-app-muted mb-1">收益项</h4>
-                      <div v-for="(value, key) in layer.revenueItems" :key="key" class="text-xs">
-                        <span class="text-app-muted">{{ COST_TYPE_LABELS[key as string] ?? key }}：</span>
-                        <span class="text-green-600 font-medium">¥{{ value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
-                      </div>
-                    </div>
+                  <!-- 右半区：目标函数组成明细表 + 总成本/售电收益 -->
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                      <thead>
+                        <tr class="border-t border-app-border bg-app-panel-soft">
+                          <th class="px-4 py-3 text-left font-medium text-app-muted">项目</th>
+                          <th class="px-4 py-3 text-right font-medium text-app-muted">金额</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="(value, key) in layer.costBreakdown"
+                          :key="key"
+                          class="border-t border-app-border"
+                        >
+                          <td class="px-4 py-3">{{ COST_TYPE_LABELS[key as string] ?? key }}</td>
+                          <td class="px-4 py-3 text-right" :class="Number(value) < 0 ? 'text-green-600' : ''">
+                            {{ formatMoney(value) }}
+                          </td>
+                        </tr>
+                        <tr
+                          v-for="(value, key) in (layer.revenueItems ?? {})"
+                          v-show="!(layer.costBreakdown && key in layer.costBreakdown)"
+                          :key="`rev-${key}`"
+                          class="border-t border-app-border"
+                        >
+                          <td class="px-4 py-3 text-green-600">{{ COST_TYPE_LABELS[key as string] ?? key }}</td>
+                          <td class="px-4 py-3 text-right text-green-600">
+                            {{ formatMoney(value) }}
+                          </td>
+                        </tr>
+                        <tr class="border-t border-app-border bg-app-panel-soft/50">
+                          <td class="px-4 py-3 font-medium text-app-text">总成本</td>
+                          <td class="px-4 py-3 text-right font-semibold text-app-text">
+                            {{ formatMoney(layer.totalCost ?? 0) }}
+                          </td>
+                        </tr>
+                        <tr class="border-t border-app-border bg-app-panel-soft/50">
+                          <td class="px-4 py-3 font-medium text-app-text">目标函数值（不含松弛惩罚）</td>
+                          <td class="px-4 py-3 text-right font-semibold text-app-text">
+                            {{ formatMoney(layer.objectiveValue ?? 0) }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               </div>
 
-              <!-- 各时层经济性对比表格 -->
+              <!-- 各时层经济性对比 + 设备经济性明细（关联展示） -->
               <div class="border border-app-border bg-white overflow-hidden">
                 <h3 class="text-sm font-semibold text-app-text px-4 pt-3 pb-2">各时层经济性对比</h3>
                 <div class="overflow-x-auto">
-                  <table class="w-full text-xs">
+                  <table class="w-full min-w-[920px] table-fixed text-sm">
+                    <colgroup>
+                      <col class="w-[6.5rem]" />
+                      <col />
+                      <col />
+                      <col class="w-[6.5rem]" />
+                      <col class="w-[6.5rem]" />
+                      <col class="w-[6.5rem]" />
+                      <col />
+                      <col class="w-[4.5rem]" />
+                    </colgroup>
                     <thead>
-                      <tr class="border-t border-app-border bg-gray-50">
-                        <th class="px-3 py-2 text-left font-medium text-app-muted">时层</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">目标函数值</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">运维成本</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">启停</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">调整</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">购电</th>
-                        <th class="px-3 py-2 text-right font-medium text-app-muted">售电</th>
-                        <th class="px-3 py-2 text-center font-medium text-app-muted">状态</th>
+                      <tr class="border-t border-app-border bg-app-panel-soft">
+                        <th class="px-3 py-3 text-left font-medium text-app-muted">时层</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">目标函数值</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">运维成本</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">启停</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">调整</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">购电</th>
+                        <th class="px-3 py-3 text-right font-medium text-app-muted">售电</th>
+                        <th class="px-3 py-3 text-center font-medium text-app-muted">状态</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2487,14 +2447,14 @@ const createTask = async () => {
                         :class="{ 'bg-blue-50': layer.layerId === economySelectedLayer }"
                         @click="economySelectedLayer = layer.layerId"
                       >
-                        <td class="px-3 py-2 font-medium">{{ layer.layerName }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ layer.objectiveValue.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ (layer.costBreakdown['om_cost'] ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ (layer.costBreakdown['on_off_cost'] ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ (layer.costBreakdown['adjust_cost'] ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-right">¥{{ (layer.costBreakdown['purchase_cost'] ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-right text-green-600">¥{{ (layer.costBreakdown['sell_revenue'] ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-                        <td class="px-3 py-2 text-center">
+                        <td class="px-3 py-3 font-medium whitespace-nowrap">{{ layer.layerName }}</td>
+                        <td class="px-3 py-3 text-right">{{ formatMoney(layer.objectiveValue) }}</td>
+                        <td class="px-3 py-3 text-right">{{ formatMoney(layer.costBreakdown['om_cost'] ?? 0) }}</td>
+                        <td class="px-3 py-3 text-right">{{ formatMoney(layer.costBreakdown['on_off_cost'] ?? 0) }}</td>
+                        <td class="px-3 py-3 text-right">{{ formatMoney(layer.costBreakdown['adjust_cost'] ?? 0) }}</td>
+                        <td class="px-3 py-3 text-right">{{ formatMoney(layer.costBreakdown['purchase_cost'] ?? 0) }}</td>
+                        <td class="px-3 py-3 text-right text-green-600">{{ formatMoney(layer.costBreakdown['sell_revenue'] ?? 0) }}</td>
+                        <td class="px-3 py-3 text-center">
                           <span v-if="layer.hasSlack" class="text-orange-500" title="存在松弛变量">⚠️</span>
                           <span v-else class="text-green-500" title="能量平衡">✓</span>
                         </td>
@@ -2502,46 +2462,48 @@ const createTask = async () => {
                     </tbody>
                   </table>
                 </div>
-              </div>
 
-              <!-- 设备经济性明细 -->
-              <div class="border border-app-border bg-white p-4">
-                <div class="flex items-center justify-between mb-3">
-                  <h3 class="text-sm font-semibold text-app-text">设备经济性明细</h3>
-                  <div class="text-[11px] text-app-muted">
-                    <span class="inline-block w-2 h-2 rounded-full bg-app-text align-middle mr-1" />进入目标函数
-                    <span class="inline-block w-2 h-2 rounded-full bg-gray-300 align-middle mr-1 ml-3" />未选入目标（仅统计）
+                <!-- 设备经济性明细 -->
+                <div class="border-t border-app-border p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-app-text">设备经济性明细</h3>
+                    <div class="text-xs text-app-muted">
+                      <span class="inline-block w-2 h-2 rounded-full bg-app-text align-middle mr-1" />进入目标函数
+                      <span class="inline-block w-2 h-2 rounded-full bg-gray-300 align-middle mr-1 ml-3" />未选入目标（仅统计）
+                    </div>
                   </div>
-                </div>
-                <div v-if="economySelectedLayerSummary" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                   <div
-                    v-for="(value, compKey) in economySelectedLayerSummary.componentBreakdown"
-                    :key="compKey"
-                    class="rounded-[4px] border border-app-border p-3 bg-white shadow-sm"
+                    v-if="economySelectedLayerSummary"
+                    class="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3"
                   >
-                    <div class="text-xs font-semibold text-app-text mb-2">{{ compKey }}</div>
-                    <div class="text-sm font-medium">¥{{ formatMoney(value) }}</div>
-                    <!-- 该组件的各成本项 -->
-                    <div class="mt-2 space-y-1">
-                      <div
-                        v-for="item in economyData.allCostItems.filter(i => i.layerId === economySelectedLayerSummary!.layerId && `${i.componentType}_${i.componentId}` === compKey)"
-                        :key="item.costType"
-                        class="text-xs"
-                        :class="{ 'text-gray-400': !item.inObjective && !item.isSlack, 'text-app-muted': item.inObjective, 'text-orange-600': item.isSlack }"
-                        :title="item.formula || ''"
-                      >
-                        <div class="flex justify-between gap-2">
-                          <span class="truncate">
-                            {{ item.costLabel }}
-                            <span v-if="item.isSlack" class="text-orange-500">[松弛]</span>
-                            <span v-else-if="!item.inObjective" class="text-gray-400">[未选入目标]</span>
-                            <span v-else class="text-emerald-600">[目标]</span>
-                          </span>
-                          <span class="shrink-0" :class="{ 'text-green-600': item.isRevenue }">
-                            ¥{{ formatMoney(item.value) }}
-                          </span>
+                    <div
+                      v-for="(value, compKey) in economySelectedLayerSummary.componentBreakdown"
+                      :key="compKey"
+                      class="rounded-lg border border-app-border bg-white p-3 shadow-sm min-w-0"
+                    >
+                      <div class="text-sm font-semibold text-app-text mb-1 truncate" :title="economyCompDisplayName(String(compKey))">
+                        {{ economyCompDisplayName(String(compKey)) }}
+                      </div>
+                      <div class="text-sm font-medium">{{ formatMoney(value) }}</div>
+                      <div class="mt-2 space-y-1">
+                        <div
+                          v-for="item in economyData.allCostItems.filter(i => i.layerId === economySelectedLayerSummary!.layerId && `${i.componentType}_${i.componentId}` === compKey)"
+                          :key="item.costType"
+                          class="text-xs"
+                          :class="{ 'text-gray-400': !item.inObjective && !item.isSlack, 'text-app-muted': item.inObjective, 'text-orange-600': item.isSlack }"
+                        >
+                          <div class="flex justify-between gap-2">
+                            <span class="truncate">
+                              {{ item.costLabel }}
+                              <span v-if="item.isSlack" class="text-orange-500">[松弛]</span>
+                              <span v-else-if="!item.inObjective" class="text-gray-400">[未选入目标]</span>
+                              <span v-else class="text-emerald-600">[目标]</span>
+                            </span>
+                            <span class="shrink-0" :class="{ 'text-green-600': item.isRevenue }">
+                              {{ formatMoney(item.value) }}
+                            </span>
+                          </div>
                         </div>
-                        <div v-if="item.formula" class="text-[10px] text-gray-400 mt-0.5 leading-snug">{{ item.formula }}</div>
                       </div>
                     </div>
                   </div>

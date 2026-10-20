@@ -28,14 +28,18 @@ function _normalize_optimizer_config(raw)
     2 <= max_evals <= 10_000 || error("maxFuncEvals 必须在 2 到 10000 之间")
     population = Int(get(config, "populationSize", min(10, max_evals)))
     2 <= population <= 500 || error("populationSize 必须在 2 到 500 之间")
-    failure_penalty = Float64(get(config, "failurePenalty", 1.0e18))
-    isfinite(failure_penalty) && failure_penalty > 0 || error("failurePenalty 必须是正的有限数值")
+    # 0 = 按目标量纲自动估算失败惩罚（optimization_runner._auto_failure_penalty_base）
+    failure_penalty = Float64(get(config, "failurePenalty", 0.0))
+    isfinite(failure_penalty) && failure_penalty >= 0 || error("failurePenalty 必须是非负有限数值（0=自动）")
+    technical_penalty = Float64(get(config, "technicalPenalty", 1.0e7))
+    isfinite(technical_penalty) && technical_penalty >= 0 || error("technicalPenalty 必须是非负有限数值")
     result = Dict{String,Any}(
         "method" => method,
         "maxFuncEvals" => max_evals,
         "populationSize" => population,
         "seed" => Int(get(config, "seed", 20260828)),
         "failurePenalty" => failure_penalty,
+        "technicalPenalty" => technical_penalty,
     )
     if haskey(config, "maxTimeSeconds") && config["maxTimeSeconds"] !== nothing
         max_time = Float64(config["maxTimeSeconds"])
@@ -91,7 +95,7 @@ function _normalize_economics_config(raw)
 
     economic_constraint_defaults = Dict(
         "lifecycleYears" => ("gte", 20.0, "年"),
-        "interestRatePercent" => ("lte", 5.0, "%"),
+        "interestRatePercent" => ("lte", 8.0, "%"),
         "taxRatePercent" => ("lte", 25.0, "%"),
         "targetIrrPercent" => ("gte", 8.0, "%"),
     )
@@ -100,7 +104,7 @@ function _normalize_economics_config(raw)
     legacy_financial isa AbstractDict || error("economics.financialParameters 必须是对象")
     if raw_economic_constraints === nothing
         raw_economic_constraints = Dict{String,Any}(
-            key => Dict("enabled" => false, "threshold" => get(legacy_financial, key, default_threshold))
+            key => Dict("enabled" => true, "threshold" => get(legacy_financial, key, default_threshold))
             for (key, (_, default_threshold, _)) in economic_constraint_defaults
         )
     end
@@ -117,24 +121,37 @@ function _normalize_economics_config(raw)
         else
             threshold = _normalize_percent(threshold, "$(key).threshold")
         end
+        # 经济性参数始终生效；targetIrrPercent 为默认最低收益率约束（前端不再提供勾选）
         economic_constraints[key] = Dict(
-            "enabled" => get(raw_constraint, "enabled", false) == true,
+            "enabled" => true,
             "operator" => operator,
             "threshold" => threshold,
             "unit" => unit,
         )
     end
 
+    # 生命周期财务参数（lifecycle_economics.jl 字段名，snake_case）；可选覆盖
+    raw_lifecycle = get(config, "lifecycle", Dict{String,Any}())
+    raw_lifecycle isa AbstractDict || error("economics.lifecycle 必须是对象")
+    lifecycle = Dict{String,Any}()
+    for (key, value) in raw_lifecycle
+        value isa Real || error("economics.lifecycle.$(key) 必须是数值")
+        lifecycle[string(key)] = value
+    end
+
     raw_extensions = get(config, "extensions", Dict{String,Any}())
     raw_extensions isa AbstractDict || error("economics.extensions 必须是对象")
+    technical_penalty = Float64(get(config, "technicalPenalty", 1.0e7))
+    isfinite(technical_penalty) && technical_penalty >= 0 || error("technicalPenalty 必须是非负有限数值")
     result = Dict{String,Any}(
         "evaluator" => evaluator,
         "currency" => string(get(config, "currency", "CNY")),
         "schemaVersion" => "capacity-objective-config-v2",
         "objective" => objective,
         "technicalConstraints" => constraints,
+        "technicalPenalty" => technical_penalty,
         "economicConstraints" => economic_constraints,
-        "lifecycle" => _planning_dict(get(config, "lifecycle", Dict{String,Any}()), "economics.lifecycle"),
+        "lifecycle" => lifecycle,
         "extensions" => Dict{String,Any}(string(key) => value for (key, value) in raw_extensions),
     )
     economic_evaluator_from_config(result)
@@ -209,6 +226,14 @@ function create_capacity_planning!(request::AbstractDict)
     clustering = _normalize_clustering_config(get(request, "clustering", nothing), project_id, canvas_id)
     optimizer = _normalize_optimizer_config(get(request, "optimizer", Dict()))
     economics = _normalize_economics_config(get(request, "economics", Dict("evaluator" => DEFAULT_CAPACITY_EVALUATOR_VERSION)))
+    # 技术约束惩罚系数：任务未显式配置时，取项目算法配置（建模页「算法配置」弹窗）
+    request_optimizer = get(request, "optimizer", Dict())
+    if request_optimizer isa AbstractDict && haskey(request_optimizer, "technicalPenalty")
+        economics["technicalPenalty"] = optimizer["technicalPenalty"]
+    else
+        snapshot_algo = get(snapshot, "algorithm", Dict{String,Any}())
+        economics["technicalPenalty"] = Float64(get(snapshot_algo, "technicalPenalty", optimizer["technicalPenalty"]))
+    end
     planning_layer_id = string(get(request, "planningLayerId", "1"))
     _planning_layer(snapshot, planning_layer_id)
 
@@ -249,7 +274,16 @@ function planning_worker_command(planning_id::String)
     command = project === nothing ?
         `$(Base.julia_cmd()) --startup-file=no --threads=1 $script $planning_id` :
         `$(Base.julia_cmd()) --startup-file=no --project=$(dirname(project)) --threads=1 $script $planning_id`
-    return addenv(Cmd(command; windows_hide=true), "SYNERROLL_DATA_DIR"=>BACKEND_DATA_DIR, "SYNERROLL_CAPACITY_WORKER"=>"1")
+    env = Dict{String,String}(
+        "SYNERROLL_DATA_DIR" => BACKEND_DATA_DIR,
+        "SYNERROLL_CAPACITY_WORKER" => "1",
+    )
+    # 性能探针必须显式传给独立 worker：父进程 SYNERROLL_PERF 不会被 Julia const 读取以外的方式继承到已 include 的模块。
+    perf_flag = get(ENV, "SYNERROLL_PERF", "")
+    if !isempty(perf_flag)
+        env["SYNERROLL_PERF"] = perf_flag
+    end
+    return addenv(Cmd(command; windows_hide=true), env...)
 end
 
 function _mark_planning_cancelled!(planning_id::String)
@@ -276,6 +310,7 @@ function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, 
             ctx.process = process
         end
         launched_at = time()
+        # maxTimeSeconds = 规划总墙钟（含 worker 启动）；与测试/取消语义一致
         deadline = launched_at + timeout_seconds
         heartbeat_at = launched_at
         while process_running(process)

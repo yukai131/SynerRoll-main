@@ -24,14 +24,19 @@ const localConfig = ref<AlgorithmConfig>({
   optimizationAlgorithm: 'MILP',
   solver: 'HiGHS',
   slackEnabled: false,
-  slackPenalty: 1000000
+  shortagePenalty: 1000,
+  excessPenalty: 50
 })
 
 watch(() => props.open, (isOpen) => {
   if (isOpen) {
+    const src = props.algorithm
+    const legacy = src.slackPenalty
     localConfig.value = {
-      ...props.algorithm,
-      solver: (props.algorithm.solver === 'HiGHS' || props.algorithm.solver === 'COPT' || props.algorithm.solver === 'SCIP') ? props.algorithm.solver : 'HiGHS'
+      ...src,
+      solver: (src.solver === 'HiGHS' || src.solver === 'COPT') ? src.solver : 'HiGHS',
+      shortagePenalty: src.shortagePenalty ?? legacy ?? 1000,
+      excessPenalty: src.excessPenalty ?? legacy ?? 50
     }
   }
 })
@@ -53,36 +58,58 @@ const handleCancel = () => {
     size="sm"
     @close="handleCancel"
   >
-    <div class="space-y-5 px-4 py-3">
+    <div class="space-y-4 px-4 py-3">
       <!-- 求解器 -->
-      <div>
-        <div class="mb-1.5 text-sm font-medium text-app-text">求解器</div>
-        <div class="mb-1.5 text-xs text-app-muted">选择当前项目计算任务使用的数学规划求解器</div>
-        <PropertySelect
-          v-model="localConfig.solver"
-          :options="SOLVER_OPTIONS"
-        />
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-app-text">求解器</div>
+        </div>
+        <div class="w-52 shrink-0">
+          <PropertySelect
+            v-model="localConfig.solver"
+            :options="SOLVER_OPTIONS"
+          />
+        </div>
       </div>
 
       <!-- 松弛变量开关 -->
-      <div class="flex items-center justify-between">
-        <div>
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0">
           <div class="text-sm font-medium text-app-text">启用松弛变量</div>
           <div class="mt-0.5 text-xs text-app-muted">能量平衡约束加入松弛项，保证模型始终有解</div>
         </div>
         <PropertySwitch v-model="localConfig.slackEnabled" />
       </div>
 
-      <!-- 惩罚系数 -->
-      <div>
-        <div class="mb-1.5 text-sm font-medium text-app-text">惩罚系数</div>
-        <div class="mb-1.5 text-xs text-app-muted">松弛变量在目标函数中的惩罚权重，数值越大越不容易使用松弛</div>
-        <PropertyNumber
-          v-model="localConfig.slackPenalty"
-          :step="100000"
-          :min="1"
-          unit=""
-        />
+      <!-- 缺供 / 过剩惩罚系数 -->
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-app-text">缺供惩罚</div>
+          <div class="mt-0.5 text-xs text-app-muted">SHORTAGE 系数（元/kWh），默认 1000</div>
+        </div>
+        <div class="w-52 shrink-0">
+          <PropertyNumber
+            v-model="localConfig.shortagePenalty"
+            :step="100"
+            :min="0"
+            unit=""
+          />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-app-text">过剩惩罚</div>
+          <div class="mt-0.5 text-xs text-app-muted">EXCESS 系数（元/kWh），默认 50</div>
+        </div>
+        <div class="w-52 shrink-0">
+          <PropertyNumber
+            v-model="localConfig.excessPenalty"
+            :step="10"
+            :min="0"
+            unit=""
+          />
+        </div>
       </div>
     </div>
 

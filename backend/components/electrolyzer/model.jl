@@ -23,10 +23,10 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
         lower_bound=0.0, upper_bound=params.capacity)
     H_ET = add_tracked_variable!(model, tracer, "H_ET_$(code)", time_index)
 
-    # ── 约束：产氢量 = 耗电量 × 效率 ─────────────────────────────────
+    # ── 约束：产氢量 = 耗电量 / 单位产氢能耗 ─────────────────────────
     add_tracked_linear_constraint!(model, tracer,
-        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] * $(format_val(params.efficiency)))",
-        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] / $(format_val(params.efficiency)))",
+        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
     )
 
     # ── 爬坡约束 ──────────────────────────────────────────────────────
@@ -76,8 +76,8 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
     H_ET = add_tracked_variable!(model, tracer, "H_ET_$(code)", time_index)
 
     add_tracked_linear_constraint!(model, tracer,
-        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] * $(format_val(params.efficiency)))",
-        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] / $(format_val(params.efficiency)))",
+        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
     )
 
     if params.ramp_constraint_on && length(time_index) > 1
@@ -118,8 +118,8 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
     H_ET = add_tracked_variable!(model, tracer, "H_ET_$(code)", time_index)
 
     add_tracked_linear_constraint!(model, tracer,
-        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] * $(format_val(params.efficiency)))",
-        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] / $(format_val(params.efficiency)))",
+        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
     )
 
     if params.ramp_constraint_on && length(time_index) > 1
@@ -166,8 +166,8 @@ function build_electrolyzer_status_model!(model, component::Electrolyzer, params
     H_ET = add_tracked_variable!(model, tracer, "H_ET_$(code)", time_index)
 
     add_tracked_linear_constraint!(model, tracer,
-        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] * $(format_val(params.efficiency)))",
-        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] * params.efficiency)
+        "@constraint(model, [t in $(format_val(time_index))], H_ET_$(code)[t] == E_ET_$(code)[t] / $(format_val(params.efficiency)))",
+        () -> @constraint(model, [t in time_index], H_ET[t] == E_ET[t] / params.efficiency)
     )
 
     on_off_obj = @expression(model, 0.0)

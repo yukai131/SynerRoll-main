@@ -81,3 +81,6 @@ boundary_data.csv
 # ========================
 __pycache__/
 *.pyc
+
+# Local database backups
+backup-clean-*/

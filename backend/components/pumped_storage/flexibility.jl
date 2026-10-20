@@ -12,7 +12,7 @@ function calculate_component_flexibility_impl(
     paras = component_paras(component)
     power_capacity_kw = paras["capacity"]
     energy_capacity_kwh = paras["storage_capacity"]
-    ramp_rate_kw_per_hour = paras["ramp"] * power_capacity_kw
+    ramp_rate_kw_per_hour = ramp_per_min_to_per_hour(paras["ramp"]) * power_capacity_kw
 
     return calculate_storage_flexibility(
         component,

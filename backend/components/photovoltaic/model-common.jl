@@ -1,14 +1,12 @@
-# ═══════════════════════════════════════════════════════════════════════════
 # photovoltaic/model-common.jl — 共享函数
 #
 # model-base.jl 和 model.jl 共用的参数解析与辅助函数
-# ═══════════════════════════════════════════════════════════════════════════
 
 function resolve_photovoltaic_params(component::Photovoltaic, ctx::BuildContext)
     layer_settings = layer_config(component, ctx.layer["id"])
     paras = component_paras(component)
     time_step_hours = step_hours(ctx.layer)
-    ramp_rate_kw_per_hour = paras["ramp"] * paras["capacity"]
+    ramp_rate_kw_per_hour = ramp_per_min_to_per_hour(paras["ramp"]) * paras["capacity"]
 
     return (
         layer_settings=layer_settings,
@@ -32,8 +30,10 @@ end
 遍历 component 的 boundaryIds，从任务时序库中查询边界数据，
 按 boundary 的物理意义（factor / irradiance / temperature / power）转换为可用功率。
 
-若组件关联了机型拟合曲线（paras["fitting"]），则完全覆盖默认公式：
-P(G,T) 为整场拟合关系，不再乘 capacity/efficiency；温度序列缺失时按 25℃ 处理。
+若组件关联了机型拟合曲线（paras["fitting"]），则覆盖默认公式：
+P(G,T) 给出「测试样本量级」的整场绝对功率形状，
+再按装机容量缩放：P = P_fit × capacity / P_STC（STC 为 G=1000、T=25℃ 处曲线值），
+并钳位到 [0, capacity]。温度序列缺失时按 25℃ 处理。
 """
 function generate_photovoltaic_max_power(component::Photovoltaic, ctx::BuildContext)
     boundary_ids = component_boundary_ids(component)
@@ -44,6 +44,7 @@ function generate_photovoltaic_max_power(component::Photovoltaic, ctx::BuildCont
     use_fitting = fitting isa AbstractDict && string(get(fitting, "type", "")) == "pv"
 
     if use_fitting
+        fitting_params = get(fitting, "params", Dict{String,Any}())
         irr = nothing
         temp = nothing
         power_direct = nothing
@@ -65,7 +66,12 @@ function generate_photovoltaic_max_power(component::Photovoltaic, ctx::BuildCont
         power_direct !== nothing && return power_direct
         irr === nothing && error("PV fitting requires an irradiance boundary — checked: $(boundary_ids)")
         temp_vec = temp === nothing ? fill(25.0, length(irr)) : temp
-        return evaluate_pv_fitting_curve(irr, temp_vec, get(fitting, "params", Dict{String,Any}()))
+        raw_power = evaluate_pv_fitting_curve(irr, temp_vec, fitting_params)
+        return scale_fitting_power_to_capacity(
+            raw_power,
+            paras["capacity"],
+            pv_fitting_reference_power(fitting_params),
+        )
     end
 
     for boundary_id in boundary_ids

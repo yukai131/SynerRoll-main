@@ -11,7 +11,7 @@ export const chapter1: DocChapter = {
       blocks: [
         {
           type: 'p',
-          text: 'SynerRoll（综合能源系统配置策略优化软件）是一套面向综合能源系统的优化建模与仿真计算母机。它用图形化画布描述源—网—荷—储拓扑，用组件参数与外部时序（边界）描述运行条件，用 Julia/JuMP 构建 MILP 优化模型，调用 HiGHS/COPT/SCIP 求解，并将运行结果、灵活性评价、经济性评价回传到桌面界面。'
+          text: 'SynerRoll（综合能源系统配置策略优化软件）是一套面向综合能源系统的优化建模与仿真计算母机。它用图形化画布描述源—网—荷—储拓扑，用组件参数与外部时序（边界）描述运行条件，用 Julia/JuMP 构建 MILP 优化模型，调用 HiGHS/COPT 求解，并将运行结果、灵活性评价、经济性评价回传到桌面界面。'
         },
         {
           type: 'p',
@@ -148,7 +148,7 @@ export const chapter1: DocChapter = {
         {
           type: 'list',
           items: [
-            '模型族以 MILP 为主；求解器可选 HiGHS（默认，开源）、COPT（商业）、SCIP（开源）。',
+            '模型族以 MILP 为主；求解器可选 HiGHS（默认，开源）、COPT（商业）。',
             '松弛惩罚默认 ρ = 1e6，可在算法配置中改；关松弛则严格平衡。',
             '任务五阶段：PARSE → BUILD 准备 → 边界注入 → SOLVING 滚动求解 → 完成（灵活性汇总 + 状态 completed）。',
             '结果写入任务时序库，前端按仿真头水位增量拉取并绘制。'
@@ -213,7 +213,7 @@ export const chapter1: DocChapter = {
           type: 'table',
           headers: ['选项', '说明', '默认'],
           rows: [
-            ['求解器', 'HiGHS（开源）/ COPT（商业）/ SCIP（开源）', 'HiGHS'],
+            ['求解器', 'HiGHS（开源）/ COPT（商业）', 'HiGHS'],
             ['启用松弛变量', '能量平衡加入缺额/过剩松弛，保证模型始终有解', '关'],
             ['惩罚系数', '松弛在目标中的权重，越大越不容易用松弛', '1000000'],
             ['优化算法', '模型族标识（MILP 等）', 'MILP'],

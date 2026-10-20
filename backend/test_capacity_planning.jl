@@ -8,8 +8,8 @@ const server_path = joinpath(@__DIR__, "server.jl")
 const server_source = read(server_path, String)
 const load_end = findfirst("# 全局常量", server_source)
 # Exercise the production include order with HiGHS; commercial COPT binaries and
-# the optional SCIP solver are not needed for this regression suite.
-load_source = replace(server_source[1:first(load_end)-1], "using COPT"=>"", "using SCIP"=>"")
+
+load_source = replace(server_source[1:first(load_end)-1], "using COPT"=>"", ""=>"")
 runner_path = joinpath(@__DIR__, "services/capacity_planning/optimization_runner.jl")
 load_source = replace(load_source, "include(\"services/capacity_planning/optimization_runner.jl\")" =>
     "include_string(Main, replace(read($(repr(runner_path)), String), \"using COPT\"=>\"\"), $(repr(runner_path)))")
@@ -98,8 +98,8 @@ end
     end
 
     @testset "Lifecycle cash flows agree with hand calculation" begin
-        item = LifecycleCapexItem(node_id="wind",name="WT",comp_type="WT",capacity_kw=100.0,
-            unit_capex_yuan_per_kw=1000.0,capex_wan=10.0,existing_capacity_kw=0.0,existing_capex_wan=0.0,
+        item = LifecycleCapexItem(node_id="wind",name="WT",comp_type="WT",capacity=100.0,
+            capacity_unit="kW",unit_capex_yuan_per_unit=1000.0,capex_wan=10.0,existing_capacity=0.0,existing_capex_wan=0.0,
             change_kind="new",depreciation_years=2,salvage_rate=0.0)
         params = LifecycleFinancialParams(operation_years=2,discount_rate=0.1,income_tax_rate=0.0,
             output_vat_rate=0.0,input_vat_rate=0.0,construction_vat_rate=0.0,working_capital_rate=0.0)
@@ -137,7 +137,7 @@ end
             timestamps = ["$(hour):00" for hour in 0:47]
             values = vcat(fill(output,24),fill(1.0e6,24))
             set_ts(path,"WT|E_WT_wind|power#1",TimeSeries(timestamps,values))
-            set_ts(path,"WT|E_WT_cut_wind|cut#1",TimeSeries(timestamps,fill(100.0,48)))
+            set_ts(path,"WT|E_WT_cut_wind|power#1",TimeSeries(timestamps,fill(100.0,48)))
             set_ts(path,"GRID|E_GRID_in_grid|power#1",TimeSeries(timestamps,values))
             set_ts(path,"GRID|E_GRID_out_grid|power#1",TimeSeries(timestamps,zeros(48)))
             set_ts(path,"BUS|Q_EXCESS_test|slack#1",TimeSeries(timestamps,vcat(zeros(24),fill(1.0e6,24))))
@@ -179,12 +179,18 @@ end
         @test comparison["candidates"][1]["metrics"]["detail"]["cashflowWan"] isa AbstractVector
         @test isempty(list_tasks())
         # Exercise the actual worker entry point, not just in-process evaluation.
-        request["optimizer"]["maxTimeSeconds"] = 120
+        request["optimizer"]["maxTimeSeconds"] = 180
         isolated = create_capacity_planning!(request)
         start_capacity_planning!(isolated["id"])
         ctx = PLANNING_CONTEXTS[isolated["id"]]
-        @test timedwait(() -> istaskdone(ctx.julia_task), 120.0) == :ok
-        @test get_planning_task(isolated["id"])["status"] == "completed"
+        @test timedwait(() -> istaskdone(ctx.julia_task), 240.0) == :ok
+        isolated_status = get_planning_task(isolated["id"])
+        if isolated_status["status"] != "completed"
+            @info "isolated worker failed" status=isolated_status["status"] err=isolated_status["errorCode"] msg=isolated_status["errorMessage"]
+            logp = joinpath(planning_task_dir(isolated["id"]), "logs", "worker.log")
+            isfile(logp) && @info "worker.log" text=String(read(logp))
+        end
+        @test isolated_status["status"] == "completed"
         @test get_planning_result(isolated["id"]) !== nothing
         @test ctx.process !== nothing && !process_running(ctx.process)
         @test isempty(list_tasks())

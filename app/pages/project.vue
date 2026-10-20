@@ -18,6 +18,9 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const showCreateDialog = ref(false)
 const creatingProject = ref(false)
 const newProjectName = ref('')
+const showCopyDialog = ref(false)
+const copyingProject = ref(false)
+const copyProjectName = ref('')
 
 const { data, pending, refresh } = await useAsyncData('project-list', () => projectApi.listProjects())
 
@@ -176,6 +179,43 @@ const renameProject = async () => {
   push({ tone: 'success', title: '项目已重命名' })
 }
 
+const openCopyDialog = () => {
+  if (!selectedProject.value) {
+    push({ tone: 'warning', title: '请先选择要复制的项目' })
+    return
+  }
+
+  copyProjectName.value = `${selectedProject.value.name} - 副本`
+  showCopyDialog.value = true
+}
+
+const copyProject = async () => {
+  if (!selectedProject.value) {
+    return
+  }
+
+  const name = copyProjectName.value.trim()
+  if (!name) {
+    push({ tone: 'warning', title: '请输入副本项目名称' })
+    return
+  }
+
+  copyingProject.value = true
+  try {
+    const created = await projectApi.copyProject(selectedProject.value.id, { name })
+    await refresh()
+    selectedProjectId.value = created.project.id
+    showCopyDialog.value = false
+    push({ tone: 'success', title: '项目已复制', description: `已创建「${created.project.name}」` })
+  }
+  catch (error) {
+    push({ tone: 'danger', title: '项目复制失败', description: String(error) })
+  }
+  finally {
+    copyingProject.value = false
+  }
+}
+
 const deleteProject = async () => {
   if (!selectedProject.value) {
     return
@@ -284,6 +324,7 @@ const importProject = async (event: Event) => {
           </div>
           <div class="flex items-center gap-2">
             <AppButton label="重命名" icon="docs" tone="neutral" :disabled="selectedIsBuiltInScenario" @click="renameProject" />
+            <AppButton label="复制" icon="copy" tone="neutral" :disabled="!selectedProject" data-testid="copy-project" @click="openCopyDialog" />
             <AppButton label="导出" icon="download" tone="neutral" @click="exportProject" />
             <AppButton label="删除" icon="delete" tone="danger" :disabled="selectedIsBuiltInScenario" @click="deleteProject" />
           </div>
@@ -384,6 +425,39 @@ const importProject = async (event: Event) => {
         </div>
       </aside>
     </div>
+
+    <AppModal
+      :open="showCopyDialog"
+      title="复制项目"
+      size="sm"
+      @close="showCopyDialog = false"
+    >
+      <div class="space-y-4 p-3">
+        <label class="block space-y-1.5 text-sm text-app-text">
+          <span class="font-medium">副本项目名称</span>
+          <input
+            v-model="copyProjectName"
+            data-testid="copy-project-name"
+            class="field-input"
+            placeholder="请输入副本项目名称"
+            @keyup.enter="copyProject"
+          >
+        </label>
+        <p class="text-xs leading-5 text-app-muted">
+          将完整复制画布、时层、边界、算法与求解器配置，生成一个内容相同、名称可自定义的新项目。
+        </p>
+      </div>
+      <template #footer>
+        <AppButton label="取消" tone="neutral" @click="showCopyDialog = false" />
+        <AppButton
+          :label="copyingProject ? '复制中...' : '创建副本'"
+          tone="primary"
+          data-testid="copy-project-submit"
+          :disabled="copyingProject"
+          @click="copyProject"
+        />
+      </template>
+    </AppModal>
 
     <AppModal
       :open="showCreateDialog"

@@ -81,6 +81,8 @@
   "isPartial": true,
   "progressRatio": 0.75,
   "netCost": 12345.67,
+  "layerCount": 3,
+  "aggregation": "mean",
   "objectiveValue": 12000.0,
   "dailyAvgCost": 16460.89,
   "monthlyEstimateCost": 493826.7,
@@ -93,7 +95,8 @@
 
 换算规则：
 
-- 日均 = 累计净成本 / 已覆盖天数
+- 日均 = 平均净成本 / 已覆盖天数
+- 多时层总览：各时层为同一时段的并行求解，`metrics` 取有效时层数学平均（空层不计入分母），不再跨层累加
 - 月均估算 = 日均 × 30
 - 年化估算 = 日均 × 365（粗估，非财务全生命周期）
 - 多日任务优先用日历天数（`sim_start_date` / `sim_end_date`）；否则按小时 / 24
@@ -105,7 +108,7 @@
 | 前端 | 后端字段 |
 |------|---------|
 | 运行中徽标 | `isPartial` + `coveredEnd` |
-| 累计净成本 | `metrics.netCost` |
+| 平均净成本 | `metrics.netCost` |
 | 日均 / 月均 / 年化 | `metrics.dailyAvgCost` / `monthlyEstimateCost` / `annualEstimateCost` |
 | 覆盖进度 | `metrics.progressRatio` |
 | 分项年化表 | `metrics.byCostType` |
@@ -146,10 +149,12 @@
 | 设备 | 边界 | 含义 | 单位 | 兜底参数 |
 |------|------|------|------|----------|
 | CP / GP / CHP | 组件绑定的 `price` 边界 | 燃料价格曲线 | 元/kWh燃料 | `commonEconomicParams.fuel_price` |
-| GRID | 第 1 条 `price` 边界 | **仅**购电分时电价 | 元/kWh电 | `buy_price` |
-| GRID | 第 2 条 `price` 边界（可选） | **仅**售电分时电价 | 元/kWh电 | `sell_price` |
+| GRID | meaning=`buy_price` 的边界 | **仅**购电分时电价 | 元/kWh电 | `buy_price` |
+| GRID | meaning=`sell_price` 的边界 | **仅**售电分时电价 | 元/kWh电 | `sell_price` |
+| CP/GP/CHP | meaning=`fuel_price` 的边界 | 燃料分时价 | 元/kWh | `fuel_price` |
 
-> **购、售电价格曲线严格独立**：不共用一条曲线，也不互相回退。只绑 1 条时只作用于购电，售电仍用 `sell_price`。若两条数值相同，请在边界页建两个价格边界（可导入同一数据文件）再分别绑定到 GRID。
+> **电价按边界 meaning 识别**（与仿真建模 `resolve_grid_price_vectors` 同口径）：
+> 优先精确匹配 `buy_price` / `sell_price` / `fuel_price`；找不到时 generic 回退到该组件绑定的第一条价格类曲线（购/售可共用同一条）；完全没有价格边界时用组件标量。不再依赖 boundaryIds 绑定顺序。购/售电价不同请分别绑定对应 meaning。
 
 边界配置页「价格配置」栏目录入；在编辑器中把组件关联到对应边界。
 

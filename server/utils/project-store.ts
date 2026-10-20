@@ -1,8 +1,12 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
 import type { Project } from '~~/types/project'
 import { createInitialProjects, normalizeProject } from '~~/utils/project-factory'
+import { cloneCanvasWithFreshIds } from '~~/utils/canvas'
+import { deepClone } from '~~/utils/clone'
+import { createBoundaryId, createId } from '~~/utils/id'
 
 const dataDirectory = join(process.cwd(), 'server', 'data')
 const dataFile = join(dataDirectory, 'projects.json')
@@ -66,6 +70,156 @@ const ensureProjectBoundaryDb = async (projectId: string): Promise<void> => {
 const removeProjectBoundaryDb = async (projectId: string): Promise<void> => {
   const dir = join(projectsBoundaryRoot, projectId)
   await rm(dir, { recursive: true, force: true })
+}
+
+// 复制源项目的 boundary 时序库到目标项目；源不存在时确保目标空库可用。
+// 必须先 wal_checkpoint(TRUNCATE) 再复制主库，否则 WAL 中未合并数据会丢失。
+// boundaryIdMap 非空时，复制后同步改写 source_id / boundary_id，保证副本与源项目边界身份隔离。
+const copyProjectBoundaryDb = async (
+  sourceProjectId: string,
+  targetProjectId: string,
+  boundaryIdMap?: Map<string, string>
+): Promise<void> => {
+  const sourceDb = join(projectsBoundaryRoot, sourceProjectId, 'boundary.db')
+  const targetDir = join(projectsBoundaryRoot, targetProjectId)
+  const targetDb = join(targetDir, 'boundary.db')
+  await mkdir(targetDir, { recursive: true })
+
+  let sourceExists = true
+  try {
+    await readFile(sourceDb)
+  }
+  catch (error) {
+    const isMissing = typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+    if (!isMissing) throw error
+    sourceExists = false
+  }
+
+  if (!sourceExists) {
+    await ensureProjectBoundaryDb(targetProjectId)
+    return
+  }
+
+  // 把 WAL 内容合并进主库，保证 copyFile 拿到完整数据
+  const source = new DatabaseSync(sourceDb)
+  try {
+    source.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+  }
+  finally {
+    source.close()
+  }
+
+  await copyFile(sourceDb, targetDb)
+  // 清掉目标侧可能残留的 WAL/SHM，避免与刚复制的主库不一致
+  await rm(`${targetDb}-wal`, { force: true })
+  await rm(`${targetDb}-shm`, { force: true })
+
+  if (boundaryIdMap && boundaryIdMap.size > 0) {
+    const target = new DatabaseSync(targetDb)
+    try {
+      target.exec('BEGIN IMMEDIATE')
+      for (const [oldId, newId] of boundaryIdMap) {
+        if (oldId === newId) continue
+        target.prepare('UPDATE time_series_meta SET source_id = ? WHERE source_id = ?').run(newId, oldId)
+        target.prepare('UPDATE boundary_config SET boundary_id = ? WHERE boundary_id = ?').run(newId, oldId)
+      }
+      target.exec('COMMIT')
+    }
+    catch (error) {
+      try { target.exec('ROLLBACK') } catch { /* ignore */ }
+      throw error
+    }
+    finally {
+      target.close()
+    }
+  }
+}
+
+/**
+ * 复制项目内部身份：画布/节点/边全部换新 ID，边界 ID 也换新并同步改写引用。
+ * 返回 boundaryIdMap（旧→新）供 boundary.db source_id 改写使用。
+ */
+const cloneProjectIdentity = (source: Project): { project: Project; boundaryIdMap: Map<string, string> } => {
+  const cloned = deepClone(source)
+  const boundaryIdMap = new Map<string, string>()
+  const remapNodeId = new Map<string, string>()
+
+  // 1. 节点/边/画布：整画布换新 ID，同时建立节点映射
+  const canvases = (cloned.workspace?.canvases ?? []).map(canvas => {
+    const fresh = cloneCanvasWithFreshIds(canvas)
+    canvas.nodes.forEach((oldNode, index) => {
+      const newNode = fresh.nodes[index]
+      if (newNode) remapNodeId.set(oldNode.id, newNode.id)
+    })
+    return fresh
+  })
+
+  // 2. 边界：换新 ID；relatedComponents 用源项目数据 + 节点映射重写
+  const sourceBoundaries = source.boundaries ?? []
+  const boundaries = sourceBoundaries.map(boundary => {
+    const nextId = createBoundaryId()
+    boundaryIdMap.set(boundary.id, nextId)
+    return {
+      ...deepClone(boundary),
+      id: nextId,
+      relatedComponents: (boundary.relatedComponents ?? [])
+        .map(nodeId => remapNodeId.get(nodeId) ?? nodeId)
+        .filter((id, index, arr) => arr.indexOf(id) === index)
+    }
+  })
+
+  // 3. 节点上的 boundaryIds 同步改写
+  const nextCanvases = canvases.map(canvas => ({
+    ...canvas,
+    nodes: canvas.nodes.map(node => {
+      const business = node.data?.business
+      if (!business?.boundaryIds?.length) return node
+      return {
+        ...node,
+        data: {
+          ...node.data!,
+          business: {
+            ...business,
+            boundaryIds: business.boundaryIds
+              .map(id => boundaryIdMap.get(id) ?? id)
+              .filter((id, index, arr) => arr.indexOf(id) === index)
+          }
+        }
+      }
+    })
+  }))
+
+  const sourceActiveIndex = (source.workspace?.canvases ?? [])
+    .findIndex(c => c.id === source.workspace?.activeCanvasId)
+
+  return {
+    project: {
+      ...cloned,
+      workspace: {
+        ...cloned.workspace,
+        activeCanvasId: nextCanvases[sourceActiveIndex]?.id ?? nextCanvases[0]?.id ?? '',
+        canvases: nextCanvases,
+        clipboard: null
+      },
+      boundaries
+    },
+    boundaryIdMap
+  }
+}
+
+const resolveCopyName = (projects: Project[], sourceName: string, preferredName?: string): string => {
+  const baseName = preferredName?.trim() || `${sourceName} - 副本`
+  const existingNames = new Set(projects.map(project => project.name))
+
+  if (!existingNames.has(baseName)) {
+    return baseName
+  }
+
+  let suffix = 2
+  while (existingNames.has(`${baseName} ${suffix}`)) {
+    suffix += 1
+  }
+  return `${baseName} ${suffix}`
 }
 
 const ensureStoreUnlocked = async (): Promise<Project[]> => {
@@ -181,6 +335,37 @@ export const createProjectRecord = async (project: Project): Promise<Project> =>
     await ensureProjectBoundaryDb(normalizedProject.id)
 
     return normalizedProject
+  })
+
+/**
+ * 复制项目：深拷贝全部项目配置（画布/时层/边界元数据/算法/求解器），
+ * 重生成项目/画布/节点/边/边界 ID，并同步复制 boundary 时序库。
+ */
+export const copyProjectRecord = async (projectId: string, preferredName?: string): Promise<Project> =>
+  withStoreLock(async () => {
+    const projects = await ensureStoreUnlocked()
+    const sourceProject = projects.find(project => project.id === projectId)
+
+    if (!sourceProject) {
+      throw createError({ statusCode: 404, statusMessage: `Project ${projectId} not found` })
+    }
+
+    const normalizedSource = normalizeProject(sourceProject)
+    const now = new Date().toISOString()
+    const { project: identityProject, boundaryIdMap } = cloneProjectIdentity(normalizedSource)
+    const copiedProject = normalizeProject({
+      ...identityProject,
+      id: createId('project'),
+      name: resolveCopyName(projects, normalizedSource.name, preferredName),
+      createTime: now,
+      updateTime: now
+    })
+
+    const nextProjects = [...projects, copiedProject]
+    await writeProjectsUnlocked(nextProjects)
+    await copyProjectBoundaryDb(projectId, copiedProject.id, boundaryIdMap)
+
+    return copiedProject
   })
 
 export const removeProject = async (projectId: string): Promise<void> =>

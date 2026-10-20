@@ -21,6 +21,7 @@ export type ComponentGroupKey =
   | 'power-external-source'
   | 'power-converter'
   // 氢能系统
+  | 'hydrogen-external-source'
   | 'hydrogen-converter'
   | 'hydrogen-storage'
   // 储能

@@ -15,12 +15,14 @@ import type {
 import {
   BOUNDARY_MEANING_LABELS,
   BOUNDARY_MEANING_UNITS,
+  BOUNDARY_MEANING_UNIT_OPTIONS,
   BOUNDARY_MODULE_OPTIONS,
   BOUNDARY_MODULE_LABELS,
   INTERPOLATE_OPTIONS,
   DISTRIBUTION_OPTIONS,
   TIME_STEP_OPTIONS,
   boundaryAxisName,
+  meaningMatchesBoundaryKey,
   meaningsForModule,
   resolveBoundaryModuleKey,
   type BoundaryModuleKey
@@ -40,6 +42,7 @@ import { timeLabelToMinutes } from '~~/utils/timeLabel'
 import { downsampleTimeSeries } from '~~/utils/chart-downsample'
 import {
   getBoundaryRelatedComponentsForActiveCanvas,
+  reconcileBoundaryBindings,
   setBoundaryRelatedComponentsForActiveCanvas,
   syncBoundaryStateFromBoundaries
 } from '~~/utils/boundary-sync'
@@ -244,6 +247,8 @@ const form = reactive({
   columnName: '',
   timeStep: '1h',
   meaning: 'wind_speed' as BoundaryMeaning,
+  /** 显式单位（负荷等多单位含义）；空则用含义默认 */
+  unit: '' as string,
   relatedComponents: [] as string[],
   interpolateType: 'copy' as const,
   randomDistribution: 'normal' as const,
@@ -251,6 +256,18 @@ const form = reactive({
   timeMode: 'calendar' as BoundaryTimeMode,
   calendarStartDate: DEFAULT_BOUNDARY_START_DATE
 })
+
+/** 当前含义可选单位；无多单位选项时只读展示默认单位 */
+const unitOptions = computed(() => {
+  const options = BOUNDARY_MEANING_UNIT_OPTIONS[form.meaning as BoundaryMeaning]
+  if (options && options.length > 0) return options
+  const fallback = BOUNDARY_MEANING_UNITS[form.meaning as BoundaryMeaning] ?? ''
+  return [fallback].filter(Boolean)
+})
+
+const unitOptionsForSelect = computed(() =>
+  unitOptions.value.map(u => ({ label: u || '(无单位)', value: u }))
+)
 
 const calendarEndDate = computed(() => {
   if (!isDateOnly(form.calendarStartDate)) return ''
@@ -587,15 +604,17 @@ const flushProjectSyncPersist = async () => {
 
 // 根据物理含义获取可用的组件节点
 // 2026-07-07: 从 componentDefinitionMap.boundaryKey?.includes(meaning) 反查节点类型
+// 使用 meaningMatchesBoundaryKey（含旧版 other/heat/hydrogen/power 词表兼容）
+
 const availableRelatedNodes = computed((): Array<{ id: string; data?: { label?: string } }> => {
   if (!project.value) return []
   const canvas = project.value.workspace.canvases.find(c => c.id === project.value!.workspace.activeCanvasId) || project.value.workspace.canvases[0]
   if (!canvas) return []
 
-  // 收集所有"def.boundaryKey 包含当前 meaning"的组件 key，画布上属于这些类型的节点都是候选
+  // 收集所有「def.boundaryKey 接受当前 meaning」的组件 key，画布上属于这些类型的节点都是候选
   const acceptedComponentKeys = new Set<string>()
   for (const def of Object.values(componentDefinitionMap)) {
-    if (def.boundaryKey?.includes(form.meaning)) {
+    if (meaningMatchesBoundaryKey(def.boundaryKey, form.meaning)) {
       acceptedComponentKeys.add(def.key)
     }
   }
@@ -661,28 +680,38 @@ async function initBoundaries() {
     const def = componentDefinitionMap[componentKey]
     if (!def?.boundaryKey?.length) continue
 
-    const meaning = def.boundaryKey[0]
-    const existing = newBoundaries.find(b => b.meaning === meaning)
-    if (existing) {
-      if (!existing.relatedComponents.includes(node.id)) {
-        existing.relatedComponents.push(node.id)
+    // 语义拆分后：buy_price+sell_price / h2_buy_price+h2_sell_price 是互补语义槽（各建一条）；
+    // 其余（wind_speed/factor/power 等）是可选替代含义，只建 boundaryKey[0]。
+    const meanings: string[] = (() => {
+      const bk = def.boundaryKey
+      if (bk.includes('buy_price') && bk.includes('sell_price')) return ['buy_price', 'sell_price']
+      if (bk.includes('h2_buy_price') && bk.includes('h2_sell_price')) return ['h2_buy_price', 'h2_sell_price']
+      return [bk[0]!]
+    })()
+
+    for (const meaning of meanings) {
+      const existing = newBoundaries.find(b => b.meaning === meaning)
+      if (existing) {
+        if (!existing.relatedComponents.includes(node.id)) {
+          existing.relatedComponents.push(node.id)
+        }
+      } else {
+        const id = generateId()
+        const cnName = BOUNDARY_MEANING_LABELS[meaning as keyof typeof BOUNDARY_MEANING_LABELS] ?? meaning
+        newBoundaries.push({
+          id,
+          category: resolveBoundaryModuleKey({ meaning, name: cnName }),
+          name: `${cnName}`,
+          filePath: '',
+          columnName: '',
+          timeStep: '1h',
+          meaning: meaning as BoundaryItem['meaning'],
+          relatedComponents: [node.id],
+          interpolateType: 'copy',
+          randomDistribution: 'normal',
+          noiseLevel: 0
+        })
       }
-    } else {
-      const id = generateId()
-      const cnName = BOUNDARY_MEANING_LABELS[meaning]
-      newBoundaries.push({
-        id,
-        category: resolveBoundaryModuleKey({ meaning, name: cnName }),
-        name: `${cnName}`,
-        filePath: '',
-        columnName: '',
-        timeStep: '1h',
-        meaning,
-        relatedComponents: [node.id],
-        interpolateType: 'copy',
-        randomDistribution: 'normal',
-        noiseLevel: 0
-      })
     }
   }
 
@@ -726,6 +755,7 @@ function saveCurrentFormToBoundary() {
   boundary.columnName = form.columnName
   boundary.timeStep = form.timeStep
   boundary.meaning = form.meaning
+  boundary.unit = form.unit || undefined
   boundary.relatedComponents = setBoundaryRelatedComponentsForActiveCanvas(
     boundary,
     project.value.workspace,
@@ -842,6 +872,7 @@ async function loadBoundaryInternal(id: string) {
     columnName: boundary.columnName,
     timeStep: boundary.timeStep,
     meaning: boundary.meaning,
+    unit: boundary.unit ?? '',
     relatedComponents: getBoundaryRelatedComponentsForActiveCanvas(boundary, project.value.workspace),
     interpolateType: boundary.interpolateType,
     randomDistribution: boundary.randomDistribution,
@@ -1046,6 +1077,7 @@ function createBoundary(moduleKey?: BoundaryModuleKey) {
     columnName: '',
     timeStep: '1h',
     meaning: defaultMeaning,
+    unit: BOUNDARY_MEANING_UNITS[defaultMeaning] ?? '',
     relatedComponents: [],
     interpolateType: 'copy',
     randomDistribution: 'normal',
@@ -1426,7 +1458,7 @@ function updateRawChart() {
     rawChartInstance = echarts.init(container)
 
     // 使用中文label作为纵坐标名称
-    const yAxisName = boundaryAxisName(form.meaning)
+    const yAxisName = boundaryAxisName(form.meaning, form.unit)
     // X 为时间轴；Y 带物理单位，如「风速 (m/s)」
 
     const win = displayWindow.value
@@ -1498,7 +1530,7 @@ function updateTransformedChart() {
     if (typeof document === 'undefined') return
 
     // 使用中文label作为纵坐标名称
-    // yAxisName 在每层图内通过 boundaryAxisName(form.meaning) 计算
+    // yAxisName 在每层图内通过 boundaryAxisName(form.meaning, form.unit) 计算
 
     // 为每一层渲染独立的图表
     for (const layer of transformedData.value!.layers) {
@@ -1515,7 +1547,7 @@ function updateTransformedChart() {
 
       const win = displayWindow.value
       const points = filterByWindow(layer.timestamps, layer.values, win)
-      const yName = boundaryAxisName(form.meaning)
+      const yName = boundaryAxisName(form.meaning, form.unit)
 
       instance.setOption({
         animation: false,
@@ -1616,6 +1648,12 @@ function downloadJson(data: any, filename: string) {
 // 监听数据加载完成，初始化边界
 watch(() => data.value?.project, (proj) => {
   if (proj) {
+    // 加载时双向校准 relatedComponents ↔ boundaryIds，避免单侧脏数据导致关联丢失
+    if (proj.workspace && proj.boundaries) {
+      const reconciled = reconcileBoundaryBindings(proj.workspace, proj.boundaries)
+      proj.workspace = reconciled.workspace
+      proj.boundaries = reconciled.boundaries
+    }
     projectState.value = proj
     initBoundaries()
   }
@@ -1635,6 +1673,12 @@ watch(
   () => availableRelatedNodes.value.map(node => node.id).join('|'),
   () => {
     if (!currentBoundary.value || syncBoundaryFormSilently.value) {
+      return
+    }
+
+    // 候选列表为空时不做自动清理：多半是 meaning/boundaryKey 过滤失配，
+    // 此时清空会把用户已建立的关联（和节点 boundaryIds）一起抹掉并持久化
+    if (availableRelatedNodes.value.length === 0 && form.relatedComponents.length > 0) {
       return
     }
 
@@ -1694,10 +1738,18 @@ watch(() => form.timeStep, (newTimeStep) => {
   scheduleProjectSyncPersist()
 })
 
-// meaning 字段实时保存
+// meaning 字段实时保存；切换含义时重置为该含义默认单位
 watch(() => form.meaning, (newMeaning) => {
+  const options = BOUNDARY_MEANING_UNIT_OPTIONS[newMeaning as BoundaryMeaning]
+  form.unit = options?.[0] ?? BOUNDARY_MEANING_UNITS[newMeaning as BoundaryMeaning] ?? ''
   if (!currentBoundary.value || syncBoundaryFormSilently.value) return
-  if (newMeaning === currentBoundary.value.meaning) return
+  saveCurrentFormToBoundary()
+  scheduleProjectSyncPersist()
+})
+
+// unit 字段实时保存（负荷 kW / kg/h 等）
+watch(() => form.unit, () => {
+  if (!currentBoundary.value || syncBoundaryFormSilently.value) return
   saveCurrentFormToBoundary()
   scheduleProjectSyncPersist()
 })
@@ -1891,6 +1943,13 @@ watch(() => form.noiseLevel, (newVal) => {
               <PropertySelect
                 v-model="form.meaning"
                 :options="meaningOptions"
+              />
+            </div>
+            <div class="flex items-center gap-2 w-1/8 min-w-[120px]">
+              <label class="w-12 text-sm text-app shrink-0">单位</label>
+              <PropertySelect
+                v-model="form.unit"
+                :options="unitOptionsForSelect"
               />
             </div>
             <div class="flex items-center gap-2 w-1/6 justify-end">

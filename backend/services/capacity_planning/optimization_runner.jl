@@ -12,6 +12,44 @@ const CAPACITY_OPTIMIZER_METHODS = Set([
 const CAPACITY_EVALUATOR_VERSION = "simulation-evaluator-v1"
 const PLANNING_OPTIMIZER_LOCK = ReentrantLock()
 
+"""
+    _auto_failure_penalty_base(optimizer, objective, variables) -> Float64
+
+失败惩罚基数：optimizer.failurePenalty > 0 时作为用户覆盖；
+否则按目标量纲与变量上界自动估算，保证不可行解永远劣于可行解。
+"""
+function _auto_failure_penalty_base(optimizer::AbstractDict, objective::String, variables)::Float64
+    user = Float64(get(optimizer, "failurePenalty", 0.0))
+    if isfinite(user) && user > 0
+        return user
+    end
+    capacity_scale = 0.0
+    for item in variables
+        string(get(item, "mode", "")) == "optimize" || continue
+        ub = Float64(get(item, "upperBound", 0.0))
+        isfinite(ub) && (capacity_scale += max(ub, 0.0))
+    end
+    # 元量级粗估：容量上界 × 1e4 元/单位，再取 10 倍隔离带
+    money_scale = max(capacity_scale * 1.0e4, 1.0e8)
+    unit = _objective_unit(objective)
+    if unit == "money"
+        return 10.0 * money_scale
+    elseif unit == "intensity"
+        return 100.0
+    elseif unit == "time"
+        return 100.0
+    end
+    return 10.0
+end
+
+"""失败适应度：基数与「当前最优可行 × 10 + 基数」取大，隔离可行解。"""
+function _failure_fitness(base::Float64, best_fitness::Float64)::Float64
+    if isfinite(best_fitness)
+        return max(base, abs(best_fitness) * 10.0 + base)
+    end
+    return base
+end
+
 function _quantize_candidate(values, variables)
     quantized = Float64[]
     optimize_variables = [item for item in variables if item["mode"] == "optimize"]
@@ -326,7 +364,8 @@ function run_capacity_optimization!(planning_id::String, ctx)
         economics_config = config["economics"]
         economic_evaluator = economic_evaluator_from_config(economics_config)
         economic_version = economic_evaluator_version(economic_evaluator)
-        failure_penalty = Float64(optimizer["failurePenalty"])
+        objective = string(get(economics_config, "objective", "operating-cost-min"))
+        failure_penalty_base = _auto_failure_penalty_base(optimizer, objective, variables)
         max_evaluations = Int(optimizer["maxFuncEvals"])
         variables_optimized = [item for item in variables if item["mode"] == "optimize"]
         suggested = Float64[item["suggestedValue"] for item in variables_optimized]
@@ -378,28 +417,43 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 perf_measure("planning", planning_id, "candidate_throttle_wait") do
                     sleep(0.2)
                 end
-                values = _quantize_candidate(raw_values, variables)
+                values = perf_measure("planning", planning_id, "candidate_quantize") do
+                    _quantize_candidate(raw_values, variables)
+                end
                 candidate = _candidate_payload(variables, values)
                 candidate_hash = _candidate_hash(task, scenario_set, values, economic_version)
                 cached = cached_planning_evaluation(planning_id, candidate_hash)
-                cached !== nothing && return Float64(cached["fitness"])
+                if cached !== nothing
+                    perf_record("planning", planning_id, "candidate_cache_hit", 0.0, 0, 0, 0, "ok",
+                        Dict{String,Any}("hash" => candidate_hash, "fitness" => cached["fitness"]))
+                    return Float64(cached["fitness"])
+                end
 
                 if completed[] >= max_evaluations
-                    return isfinite(best_fitness[]) ? best_fitness[] : failure_penalty
+                    return isfinite(best_fitness[]) ? best_fitness[] : failure_penalty_base
                 end
 
                 evaluation_started = time_ns()
                 ordinal = completed[] + 1
                 feasible = false
-                evaluation_fitness = failure_penalty
+                evaluation_fitness = _failure_fitness(failure_penalty_base, best_fitness[])
                 breakdown = Dict{String,Any}()
                 error_code = nothing
                 error_message = nothing
                 warnings = String[]
                 work_dir = joinpath(planning_dir, "work", candidate_hash[1:16])
+                candidate_meta = Dict{String,Any}(
+                    "ordinal" => ordinal,
+                    "hash" => candidate_hash,
+                    "scenarioCount" => length(scenario_set["scenarios"]),
+                    "optimizeDim" => length(variables_optimized),
+                )
 
                 try
-                    violation = _variable_constraint_violation(variables, values)
+                    violation = perf_measure("planning", planning_id, "candidate_constraint_check";
+                        meta=candidate_meta) do
+                        _variable_constraint_violation(variables, values)
+                    end
                     violation === nothing || throw(CapacityPlanningError("VARIABLE_CONSTRAINT_VIOLATION", violation))
                     candidate_snapshot, capacities = perf_measure("planning", planning_id, "candidate_snapshot";
                         meta=Dict("ordinal" => ordinal)) do
@@ -463,13 +517,21 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 if !feasible
                     failed[] += 1
                     consecutive_failed[] += 1
-                    evaluation_fitness = isfinite(best_fitness[]) ?
-                        max(failure_penalty, abs(best_fitness[]) * 10 + failure_penalty) : failure_penalty
+                    evaluation_fitness = _failure_fitness(failure_penalty_base, best_fitness[])
                     breakdown = Dict("failurePenalty" => evaluation_fitness)
                 end
-                isfinite(evaluation_fitness) || (evaluation_fitness = max(failure_penalty, 1.0e18))
+                isfinite(evaluation_fitness) ||
+                    (evaluation_fitness = max(failure_penalty_base, 1.0e18))
                 duration_ms = round(Int, (time_ns() - evaluation_started) / 1_000_000)
-                evaluation_id = insert_planning_evaluation!(
+                perf_record("planning", planning_id, "candidate_total", duration_ms, 0, 0, 0,
+                    feasible ? "ok" : "failed", merge(candidate_meta, Dict{String,Any}(
+                        "feasible" => feasible,
+                        "fitness" => evaluation_fitness,
+                        "errorCode" => error_code,
+                    )))
+                evaluation_id = perf_measure("planning", planning_id, "candidate_eval_insert";
+                    meta=candidate_meta) do
+                    insert_planning_evaluation!(
                     planning_id=planning_id,
                     ordinal=ordinal,
                     candidate_hash=candidate_hash,
@@ -481,6 +543,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     error_code=error_code,
                     error_message=error_message,
                 )
+                end
                 completed[] += 1
 
                 if feasible && evaluation_fitness < best_fitness[]
@@ -525,7 +588,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 return evaluation_fitness
             end
 
-            # 建议解必须先被独立评价并进入历史。
+            # 先评价建议值，保证即使种群初始化失败也有基线
             fitness(suggested)
             _planning_cancelled(ctx) && throw(PlanningCancelled("规划任务已取消"))
 
@@ -543,7 +606,15 @@ function run_capacity_optimization!(planning_id::String, ctx)
                 )
                 max_time = get(optimizer, "maxTimeSeconds", nothing)
                 max_time !== nothing && (kwargs[:MaxTime] = Float64(max_time))
-                BlackBoxOptim.bboptimize(fitness, suggested; kwargs...)
+                perf_measure("planning", planning_id, "bboptimize"; meta=Dict{String,Any}(
+                    "maxFuncEvals" => max_evaluations,
+                    "populationSize" => Int(optimizer["populationSize"]),
+                    "optimizeDim" => length(variables_optimized),
+                    "scenarioCount" => length(scenario_set["scenarios"]),
+                    "method" => string(get(optimizer, "method", "")),
+                )) do
+                    BlackBoxOptim.bboptimize(fitness, suggested; kwargs...)
+                end
             end
 
             return complete_planning_from_evaluations!(planning_id)

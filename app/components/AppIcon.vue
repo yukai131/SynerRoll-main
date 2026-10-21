@@ -3,6 +3,9 @@ const props = withDefaults(
   defineProps<{
     name: string
     size?: number
+    width?: number
+    height?: number
+    fit?: 'contain' | 'fill'
     strokeWidth?: number
     fallbackText?: string
     /** 图片资源路径（PNG 等）。提供后优先渲染图片，未加载成功再回退 SVG path。 */
@@ -10,6 +13,7 @@ const props = withDefaults(
   }>(),
   {
     size: 18,
+    fit: 'contain',
     strokeWidth: 1.8,
     fallbackText: '',
     src: ''
@@ -22,6 +26,8 @@ watch(() => props.src, () => {
 })
 
 const showImage = computed(() => Boolean(props.src) && !imageFailed.value)
+const iconWidth = computed(() => props.width ?? props.size)
+const iconHeight = computed(() => props.height ?? props.size)
 
 const paths: Record<string, string[]> = {
   undo: ['M9 14 4 9l5-5', 'M4 9h9a7 7 0 1 1 0 14h-1'],
@@ -170,17 +176,18 @@ const fallback = computed(() => props.fallbackText || props.name.slice(0, 1).toU
     v-if="showImage"
     :src="src"
     :alt="name"
-    :width="size"
-    :height="size"
-    class="shrink-0 object-contain"
-    :style="{ width: `${size}px`, height: `${size}px`, maxWidth: '100%', maxHeight: '100%' }"
+    :width="iconWidth"
+    :height="iconHeight"
+    class="shrink-0"
+    :style="{ width: `${iconWidth}px`, height: `${iconHeight}px`, maxWidth: '100%', maxHeight: '100%', objectFit: fit }"
     @error="imageFailed = true"
   >
   <svg
     v-else-if="pathSet.length > 0"
-    :width="size"
-    :height="size"
+    :width="iconWidth"
+    :height="iconHeight"
     viewBox="0 0 24 24"
+    :preserveAspectRatio="fit === 'fill' ? 'none' : 'xMidYMid meet'"
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
     class="shrink-0"
@@ -197,7 +204,7 @@ const fallback = computed(() => props.fallbackText || props.name.slice(0, 1).toU
   </svg>
   <div
     v-else
-    :style="{ width: `${size}px`, height: `${size}px` }"
+    :style="{ width: `${iconWidth}px`, height: `${iconHeight}px` }"
     class="inline-flex items-center justify-center rounded bg-current/10 text-[10px] font-semibold leading-none"
   >
     {{ fallback }}

@@ -1,7 +1,7 @@
 /**
  * 设备颜色的唯一来源。
  *
- * 同一设备类型在画布、能流、设备出力和灵活性图表中始终使用同一颜色；
+ * 各结果图复用设备基础色；能流中的双向设备使用下方单独定义的方向色。
  * 未登记类型使用稳定哈希选择兜底色，避免因数组顺序变化而漂移。
  */
 export const DEVICE_COLOR_BY_TYPE: Readonly<Record<string, string>> = Object.freeze({
@@ -29,8 +29,10 @@ export const DEVICE_COLOR_BY_TYPE: Readonly<Record<string, string>> = Object.fre
 
 /** 双向设备在能流图中的方向色；同一运行方向在主图、图例和明细中保持一致。 */
 export const ENERGY_FLOW_COLOR_BY_ROLE: Readonly<Record<string, string>> = Object.freeze({
-  ES_CHARGE: '#F97316',
+  ES_CHARGE: '#92400E',
   ES_DISCHARGE: '#E11D48',
+  HS_CHARGE: '#475569',
+  HS_DISCHARGE: '#14B8A6',
   PS_CHARGE: '#0891B2',
   PS_DISCHARGE: '#0284C7',
   FS_CHARGE: '#D946EF',
@@ -39,7 +41,7 @@ export const ENERGY_FLOW_COLOR_BY_ROLE: Readonly<Record<string, string>> = Objec
   CS_DISCHARGE: '#06B6D4',
   GRID_PURCHASE: '#8B5CF6',
   GRID_SALE: '#1D4ED8',
-  HGRID_PURCHASE: '#14B8A6',
+  HGRID_PURCHASE: '#2DD4BF',
   HGRID_SALE: '#0F766E'
 })
 
@@ -103,6 +105,8 @@ export function getEnergyFlowColor(varName: string): string {
   if (/^E_GRID_OUT(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.GRID_PURCHASE!
   if (/^H_HGRID_IN(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HGRID_SALE!
   if (/^H_HGRID_OUT(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HGRID_PURCHASE!
+  if (/^H_HS_IN(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HS_CHARGE!
+  if (/^H_HS_OUT(?:_|$)/.test(normalized)) return ENERGY_FLOW_COLOR_BY_ROLE.HS_DISCHARGE!
 
   const storageMatch = normalized.match(/^E_(ES|PS|FS|CS)_(IN|OUT)(?:_|$)/)
   if (storageMatch) {

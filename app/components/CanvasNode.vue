@@ -26,8 +26,16 @@ const definition = computed<ComponentDefinition>(() => (
 ))
 
 const parameterTag = computed(() => {
-  const capacity = props.data.business?.commonTechParams?.capacity
-  return capacity ? `${capacity}kW` : ''
+  // 优先显示储能容量，取值及单位与右侧参数面板共用字段定义。
+  const fields = definition.value.commonTechParamFields
+  const field = fields.find(item => item.key === 'storage_capacity')
+    ?? fields.find(item => item.key === 'capacity')
+  if (!field) return ''
+
+  const value = props.data.business?.commonTechParams?.[field.key] ?? field.defaultValue
+  if (value === undefined || value === null || value === '') return ''
+
+  return `${value}${field.unit ?? ''}`
 })
 
 const fullIconMode = computed(() => {
@@ -164,13 +172,30 @@ const wrapperStyle = computed(() => {
   }
 })
 
-const iconBoxSize = computed(() => {
-  const { width, height } = props.data.style
-  const base = Math.min(width, height)
-  // 图标尽量占满节点，缩小与端口之间的空白
-  return fullIconMode.value
-    ? Math.max(48, Math.round(base * 0.86))
-    : Math.max(40, Math.round(base * 0.72))
+const iconLayout = computed(() => {
+  const style = props.data.style
+  const defaults = definition.value.defaultSize
+  // 文字仍按配置字号显示，为图标预留独立的纵向区域。
+  const labelHeight = fullIconMode.value ? 0 : 2 + 1.25 * (
+    (pageConfig?.value?.labelLanguage !== 'hidden' ? style.fontSize : 0)
+    + (pageConfig?.value?.showComponentName ? style.nameFontSize ?? style.fontSize : 0)
+    + (pageConfig?.value?.showParameterTag && parameterTag.value ? style.paramFontSize ?? style.fontSize : 0)
+  )
+  const ratio = fullIconMode.value ? 0.86 : 0.72
+  const baseSize = Math.max(1, Math.min(
+    Math.round(Math.min(defaults.width, defaults.height) * ratio),
+    defaults.height - labelHeight
+  ))
+  // 留白以组件默认尺寸为基准，改宽/高时不重新居中一个固定方形图标。
+  const availableHeight = Math.max(1, style.height - labelHeight)
+  const left = Math.max(0, Math.min((defaults.width - baseSize) / 2, (style.width - 1) / 2))
+  const top = Math.max(0, Math.min((defaults.height - labelHeight - baseSize) / 2, (availableHeight - 1) / 2))
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: Math.max(1, style.width - left * 2),
+    height: Math.max(1, availableHeight - top * 2)
+  }
 })
 </script>
 
@@ -254,20 +279,19 @@ const iconBoxSize = computed(() => {
     >
       <div
         v-if="definition.canvasType === 'energy'"
-        class="flex h-full w-full flex-col items-center justify-center overflow-hidden"
+        class="relative h-full w-full overflow-hidden"
       >
-        <span
-          class="inline-flex min-h-0 w-full flex-1 items-center justify-center overflow-hidden"
-        >
-          <AppIcon
-            :name="definition.icon"
-            :src="definition.iconSrc"
-            :size="iconBoxSize"
-            class="max-h-full max-w-full object-contain"
-            :fallback-text="definition.label.slice(0, 1)"
-          />
-        </span>
-        <div v-if="!fullIconMode" class="w-full max-w-full shrink-0 px-1 pb-0.5 text-center">
+        <AppIcon
+          :name="definition.icon"
+          :src="definition.iconSrc"
+          :width="iconLayout.width"
+          :height="iconLayout.height"
+          fit="fill"
+          class="absolute"
+          :style="{ left: iconLayout.left, top: iconLayout.top }"
+          :fallback-text="definition.label.slice(0, 1)"
+        />
+        <div v-if="!fullIconMode" class="absolute inset-x-0 bottom-0 w-full max-w-full px-1 pb-0.5 text-center">
           <p v-if="pageConfig?.labelLanguage !== 'hidden'" class="truncate font-semibold leading-tight" :style="{ fontSize: data.style.fontSize + 'px', color: data.style.textColor }">
             {{ pageConfig?.labelLanguage === 'english' ? definition.key : definition.label }}
           </p>

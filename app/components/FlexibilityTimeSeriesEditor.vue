@@ -60,13 +60,6 @@ watch(() => props.modelValue, (value) => {
   manualRows.value = recordToRows(value)
 }, { deep: true })
 
-const timeLabelMinutes = (timestamp: string): number => {
-  if (timestamp === 'default') return Number.MAX_SAFE_INTEGER
-  const match = /^(\d+):(\d{2})$/.exec(timestamp)
-  if (!match) return Number.MAX_SAFE_INTEGER - 1
-  return Number(match[1]) * 60 + Number(match[2])
-}
-
 const normalizedEntries = (
   entries: Array<{ timestamp: unknown; value: unknown }>
 ): { value: Record<string, number> | null; error: string } => {
@@ -276,10 +269,7 @@ watch(() => props.expectedTimestamps, () => {
   else if (props.mode === 'boundary' && selectedBoundary.value) applyBoundarySeries()
 }, { deep: true })
 
-const previewRows = computed(() =>
-  Object.entries(props.modelValue)
-    .sort((left, right) => timeLabelMinutes(left[0]) - timeLabelMinutes(right[0]))
-)
+const pointCount = computed(() => Object.keys(props.modelValue).length)
 </script>
 
 <template>
@@ -339,20 +329,6 @@ const previewRows = computed(() =>
     </div>
 
     <div v-if="validationMessage" class="text-xs text-app-danger">{{ validationMessage }}</div>
-    <div v-else class="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">校验通过，共 {{ previewRows.length }} 个时点。</div>
-
-    <div v-if="previewRows.length" class="overflow-hidden rounded-lg border border-app-border">
-      <div class="flex items-center justify-between bg-app-panel-soft px-3 py-2 text-[11px] text-app-muted">
-        <span>预览</span><span>显示前 {{ Math.min(8, previewRows.length) }} / {{ previewRows.length }} 条</span>
-      </div>
-      <table class="w-full text-xs">
-        <tbody>
-          <tr v-for="([timestamp, value], index) in previewRows.slice(0, 8)" :key="`${timestamp}-${index}`" class="border-t border-app-border first:border-t-0">
-            <td class="px-3 py-1.5 text-app-muted">{{ timestamp }}</td>
-            <td class="px-3 py-1.5 text-right font-medium text-app-text">{{ value }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <div v-else class="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">校验通过，共 {{ pointCount }} 个时点。</div>
   </div>
 </template>

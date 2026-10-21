@@ -2192,14 +2192,14 @@ useHead(() => ({
           </span>
         </div>
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-white transition hover:bg-white/10"
+          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium text-white transition hover:bg-white/10"
           type="button"
           @click="openTaskList"
         >
           📋 任务列表
         </button>
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-xs font-medium text-white transition hover:bg-white/30"
+          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-sm font-medium text-white transition hover:bg-white/30"
           type="button"
           @click="openCreateTask"
         >

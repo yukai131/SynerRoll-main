@@ -607,19 +607,6 @@ const updateEdgeArrowType = (arrowType: 'none' | 'start' | 'end' | 'both') => {
   }))
 }
 
-const updateDeviceCount = (value: number) => {
-  updateSelectedNode(node => ({
-    ...node,
-    data: {
-      ...node.data!,
-      business: {
-        ...node.data!.business,
-        deviceCount: value
-      }
-    }
-  }))
-}
-
 // 端口配置相关
 const getPortConfig = (portId: string): NodePortConfig[string] | undefined => {
   return selectedNode.value?.data?.portConfig?.[portId]
@@ -1135,14 +1122,6 @@ const layerStatusOptions = [
                 <PropertyText
                   :model-value="selectedNode.data.label"
                   @update:model-value="updateNodeLabel($event as string)"
-                />
-              </div>
-
-              <div class="property-row">
-                <label class="property-label">设备台数</label>
-                <PropertyNumber
-                  :model-value="selectedNode.data.business.deviceCount"
-                  @update:model-value="updateDeviceCount($event)"
                 />
               </div>
             </div>

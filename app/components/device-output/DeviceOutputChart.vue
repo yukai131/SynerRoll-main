@@ -202,7 +202,8 @@ const maximumMinute = computed(() => {
 })
 
 const xAxisInterval = computed(() => {
-  if (props.analysisMode === 'range') return 60
+  // 时间段窗口按可见跨度自动分配刻度，避免全年范围逐小时堆叠标签。
+  if (props.analysisMode === 'range') return undefined
   return props.layerIds.includes('3') ? 15 : 60
 })
 
@@ -303,7 +304,7 @@ function render(): void {
       connectNulls: false,
       lineStyle: { width: 2, color, type: lineType },
       itemStyle: { color },
-      emphasis: { focus: 'series', lineStyle: { width: 3 } }
+      emphasis: { focus: 'none', lineStyle: { width: 3 } }
     } satisfies echarts.LineSeriesOption
   })
 
@@ -347,11 +348,13 @@ function render(): void {
       min: minimumMinute.value,
       max: maximumMinute.value,
       interval: xAxisInterval.value,
+      splitNumber: 5,
       axisLine: { lineStyle: { color: '#C9CDD4' } },
       axisTick: { show: false },
       axisLabel: {
         color: '#86909C',
         fontSize: 10,
+        hideOverlap: true,
         formatter: (value: number) => formatTimelineLabel(value)
       },
       splitLine: { show: false }
@@ -570,7 +573,7 @@ watch([
   () => props.liveData,
   () => props.layerIds,
   () => props.layerLabels,
-  () => props.unitSelections,
+  axisGroups,
   () => props.analysisMode,
   () => props.traceStep,
   () => props.maximumMinute,

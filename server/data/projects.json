@@ -3,7 +3,7 @@
     "id": "project-07596191-13c9-47c9-a39c-a6a7e4e859d8",
     "name": "算例1",
     "createTime": "2026-09-16T08:29:27.927Z",
-    "updateTime": "2026-10-20T09:46:18.189Z",
+    "updateTime": "2026-10-20T18:00:22.772Z",
     "description": "从空白画布创建的综合能源项目",
     "owner": "LYDL",
     "favorite": false,
@@ -1504,8 +1504,8 @@
             }
           ],
           "viewport": {
-            "x": 232.04780242644313,
-            "y": 93.46241194568091,
+            "x": 76.04780242644313,
+            "y": 12.462411945680913,
             "zoom": 0.9896309330796706
           },
           "pageConfig": {
@@ -1522,7 +1522,7 @@
             "showPorts": true,
             "labelLanguage": "chinese"
           },
-          "updatedAt": "2026-10-20T07:54:48.896Z"
+          "updatedAt": "2026-10-20T17:59:49.947Z"
         }
       ],
       "clipboard": null
@@ -10630,7 +10630,7 @@
     "id": "project-cc6da8d2-3843-4c3d-a3f6-4e61082c2655",
     "name": "灵活性测试",
     "createTime": "2026-09-24T02:51:59.742Z",
-    "updateTime": "2026-10-19T15:21:30.341Z",
+    "updateTime": "2026-10-20T18:20:58.849Z",
     "description": "从空白画布创建的综合能源项目",
     "owner": "LYDL",
     "favorite": false,
@@ -11080,7 +11080,7 @@
                     }
                   },
                   "boundaryIds": [],
-                  "fittingModelId": "b_mvdclrgmsuuq6p"
+                  "fittingModelId": ""
                 },
                 "style": {
                   "width": 150,
@@ -11265,7 +11265,7 @@
                     }
                   },
                   "boundaryIds": [],
-                  "fittingModelId": "b_mvdclrgmupd4tj"
+                  "fittingModelId": ""
                 },
                 "style": {
                   "width": 150,
@@ -13968,9 +13968,9 @@
             }
           ],
           "viewport": {
-            "x": 476.7803377330605,
-            "y": -45.23173868024861,
-            "zoom": 0.8829412382963086
+            "x": 90.46103767435,
+            "y": -19.635064905907882,
+            "zoom": 0.6990287692077567
           },
           "pageConfig": {
             "width": 1500,
@@ -13986,7 +13986,7 @@
             "showPorts": true,
             "labelLanguage": "chinese"
           },
-          "updatedAt": "2026-10-19T15:21:29.694Z"
+          "updatedAt": "2026-10-20T18:20:57.463Z"
         }
       ],
       "clipboard": null
@@ -22887,7 +22887,7 @@
     "id": "project-a294272e-3545-44b3-b1e3-21a68a94a0fc",
     "name": "风光火储",
     "createTime": "2026-10-19T12:54:33.874Z",
-    "updateTime": "2026-10-20T06:46:24.424Z",
+    "updateTime": "2026-10-20T16:47:43.336Z",
     "description": "从空白画布创建的综合能源项目",
     "owner": "LYDL",
     "favorite": false,
@@ -24377,9 +24377,9 @@
             }
           ],
           "viewport": {
-            "x": 476.7803377330605,
-            "y": 79.76825945710627,
-            "zoom": 0.8829412382963086
+            "x": 172.36527067266667,
+            "y": 35.65517235329958,
+            "zoom": 0.7171711366479187
           },
           "pageConfig": {
             "width": 1500,
@@ -24395,7 +24395,7 @@
             "showPorts": true,
             "labelLanguage": "chinese"
           },
-          "updatedAt": "2026-10-20T06:45:56.073Z"
+          "updatedAt": "2026-10-20T16:47:42.677Z"
         },
         {
           "id": "canvas-c273c838-a3ef-40e1-b445-94c78838d686",
@@ -34876,7 +34876,7 @@
     "id": "project-c748f744-cd2d-428f-973d-8da124022fdf",
     "name": "算例2",
     "createTime": "2026-10-20T08:44:34.643Z",
-    "updateTime": "2026-10-20T13:33:40.045Z",
+    "updateTime": "2026-10-20T20:55:00.245Z",
     "description": "从空白画布创建的综合能源项目",
     "owner": "LYDL",
     "favorite": false,
@@ -35052,9 +35052,7 @@
                       }
                     }
                   },
-                  "boundaryIds": [
-                    "b_mvgft4nvrd251b"
-                  ],
+                  "boundaryIds": [],
                   "fittingModelId": ""
                 },
                 "style": {
@@ -35248,13 +35246,15 @@
                   "width": 150,
                   "height": 150,
                   "rotation": 0,
-                  "fillColor": "#F8FAFC",
+                  "fillColor": "#f7fafd",
                   "strokeColor": "#98A2B3",
                   "strokeWidth": 1.5,
                   "fontSize": 13,
                   "textColor": "#1D2939",
                   "borderRadius": 10,
-                  "opacity": 1
+                  "opacity": 1,
+                  "nameFontSize": 13,
+                  "paramFontSize": 13
                 },
                 "portConfig": {
                   "power-out": {
@@ -35827,8 +35827,7 @@
                     }
                   },
                   "boundaryIds": [
-                    "b_mvgft4nvyt2iza",
-                    "b_mvgft4nvq3e6vy"
+                    "b_mvgft4nvyt2iza"
                   ]
                 },
                 "style": {
@@ -37216,7 +37215,7 @@
           ],
           "viewport": {
             "x": 130.20705439131746,
-            "y": 3.5456605870861324,
+            "y": 3.545660587086104,
             "zoom": 0.8038300969022198
           },
           "pageConfig": {
@@ -37233,7 +37232,7 @@
             "showPorts": true,
             "labelLanguage": "chinese"
           },
-          "updatedAt": "2026-10-20T13:33:00.666Z"
+          "updatedAt": "2026-10-20T20:14:59.456Z"
         }
       ],
       "clipboard": null
@@ -37257,14 +37256,12 @@
         "filePath": "C:\\Users\\Administrator\\Desktop\\case2.csv",
         "columnName": "wind_speed_m_s",
         "timeStep": "1h",
-        "meaning": "wind_speed",
-        "relatedComponents": [
-          "node-0c1fba52-7a10-4571-8ae1-101efe0cb28d"
-        ],
+        "meaning": "power",
+        "relatedComponents": [],
         "interpolateType": "copy",
         "randomDistribution": "normal",
         "noiseLevel": 18,
-        "unit": "m/s",
+        "unit": "kW",
         "boundaryMeta": {
           "boundaryStep": "1h",
           "dayCount": 365,
@@ -37383,9 +37380,7 @@
         "columnName": "sell_price_yuan_per_kwh",
         "timeStep": "1h",
         "meaning": "sell_price",
-        "relatedComponents": [
-          "node-c7fc18c4-6374-4d75-8bf4-8766a8634b53"
-        ],
+        "relatedComponents": [],
         "interpolateType": "copy",
         "randomDistribution": "normal",
         "noiseLevel": 13,
@@ -37454,7 +37449,7 @@
         "columnName": "hydrogen_load_kg_h",
         "timeStep": "1h",
         "meaning": "load",
-        "unit": "kW",
+        "unit": "kg/h",
         "relatedComponents": [
           "node-2fe47944-6559-478b-87d3-cce307dfc005"
         ],
@@ -46361,7 +46356,7 @@
     "id": "project-f8586aa6-5506-469f-837e-37050d6d3899",
     "name": "算例3",
     "createTime": "2026-10-20T10:15:52.245Z",
-    "updateTime": "2026-10-20T10:21:05.292Z",
+    "updateTime": "2026-10-20T16:49:59.252Z",
     "description": "从空白画布创建的综合能源项目",
     "owner": "LYDL",
     "favorite": false,
@@ -47574,8 +47569,8 @@
             }
           ],
           "viewport": {
-            "x": 232.04780242644313,
-            "y": 93.46241194568091,
+            "x": 3.047802426443127,
+            "y": 47.46241194568091,
             "zoom": 0.9896309330796706
           },
           "pageConfig": {
@@ -47592,7 +47587,7 @@
             "showPorts": true,
             "labelLanguage": "chinese"
           },
-          "updatedAt": "2026-10-20T10:18:57.008Z"
+          "updatedAt": "2026-10-20T16:49:58.593Z"
         }
       ],
       "clipboard": null

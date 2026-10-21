@@ -311,11 +311,14 @@ watch(() => [props.fitting.scatter, props.fitting.curve, props.fitting.params], 
             label="拟合计算"
             tone="primary"
             :disabled="!canFit"
+            :loading="fittingLoading"
+            loading-label="拟合中..."
             @click="runFit"
           />
           <AppButton
             label="提交"
             tone="green"
+            :disabled="fittingLoading"
             @click="submitFitting"
           />
         </div>

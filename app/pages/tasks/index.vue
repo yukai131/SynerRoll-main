@@ -23,6 +23,7 @@ import { useTaskWebSocket } from '~~/composables/api/useTaskWebSocket'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
 import { useToastCenter } from '~~/state/ui'
 import { parseVariableKey, getVariableDisplayName } from '~~/config/component-meta'
+import { getResultDisplayUnit } from '~~/utils/result-units'
 import {
   FLEXIBILITY_REQUIREMENT_LABELS,
   FLEXIBILITY_REQUIREMENT_OPTIONS
@@ -188,21 +189,9 @@ const codeToLabel = computed<Record<string, string>>(() => {
 // ───── 图表显示名称 ─────
 const knownCodes = computed(() => Object.keys(codeToLabel.value))
 
-const ELECTRIC_ENERGY_VARIABLES = new Set(['E_ES', 'E_PS', 'E_FS', 'E_CS'])
-
 function getChartDisplayUnit(sourceId: string, varName: string, remark?: string): string {
-  const sourceType = sourceId.split('_')[0] ?? ''
-  if (remark === 'energy') return sourceType === 'HS' ? 'kg' : 'kWh'
-  if (remark === 'hydrogen') return 'kg/h'
-  if (remark === 'heat') return 'kW'
-  if (remark === 'power') return sourceType === 'HS' ? 'kg/h' : 'kW'
-
-  // 兼容后端尚未返回 remark 的历史接口响应。
   const { baseVarName } = parseVariableKey(`${sourceId}|${varName}`, knownCodes.value)
-  if (ELECTRIC_ENERGY_VARIABLES.has(baseVarName)) return 'kWh'
-  if (baseVarName === 'H_HS') return 'kg'
-  if (baseVarName.startsWith('H_HS_') || baseVarName === 'H_HLOAD') return 'kg/h'
-  return 'kW'
+  return getResultDisplayUnit(baseVarName, remark)
 }
 
 function getChartDisplayName(key: string): string {
@@ -1876,14 +1865,14 @@ const createTask = async () => {
       <h1 class="ml-4 text-base font-medium">结果分析</h1>
       <div class="ml-auto flex items-center gap-2">
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-white transition hover:bg-white/10"
+          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium text-white transition hover:bg-white/10"
           type="button"
           @click="openTaskList"
         >
           📋 任务列表
         </button>
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-xs font-medium text-white transition hover:bg-white/30"
+          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-sm font-medium text-white transition hover:bg-white/30"
           type="button"
           @click="showCreateDialog = true"
         >
@@ -2343,6 +2332,7 @@ const createTask = async () => {
                       </div>
                       <PieChart
                         :items="economyLayerPieItems[layer.layerId]"
+                        unit="元"
                       />
                     </div>
                     <div v-else class="text-sm text-app-muted">

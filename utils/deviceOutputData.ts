@@ -1,6 +1,7 @@
 import type { FlowNode } from '~~/types/canvas'
 import type { Project } from '~~/types/project'
 import { VARIABLE_DISPLAY_NAMES, componentDefinitionMap } from '~~/config/component-meta'
+import { getResultDisplayUnit } from '~~/utils/result-units'
 
 export interface DeviceOutputPoint {
   ts: string
@@ -178,7 +179,9 @@ export function buildDeviceOutputCatalog(
     const code = nodeCode(node)
     const componentType = normalizeComponentType(node, sourceId, varName)
     const baseVarName = baseVariableName(varName, code)
-    const originalUnit = units[key] || inferDefaultUnit(baseVarName)
+    const originalUnit = baseVarName.startsWith('H_')
+      ? getResultDisplayUnit(baseVarName)
+      : units[key] || inferDefaultUnit(baseVarName)
     const dimension = inferDimension(originalUnit)
     const medium = inferMedium(componentType, baseVarName)
     const deviceName = String(node.data?.label || node.data?.business?.componentName || componentType)
@@ -235,10 +238,7 @@ export function buildDeviceOutputCatalog(
 }
 
 export function inferDefaultUnit(baseVarName: string): string {
-  if (['E_ES', 'E_PS', 'E_FS', 'E_CS'].includes(baseVarName)) return 'kWh'
-  if (baseVarName === 'H_HS') return 'kg'
-  if (baseVarName.startsWith('H_')) return 'kg/h'
-  return 'kW'
+  return getResultDisplayUnit(baseVarName)
 }
 
 export function unitOptionsForDimension(dimension: string, originalUnit: string): UnitOption[] {

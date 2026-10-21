@@ -7,6 +7,7 @@ import {
 import { downsampleTimeSeries } from '~~/utils/chart-downsample'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { getEnergyFlowColor } from '~~/config/device-colors'
+import { getResultFlowMedium, RESULT_FLOW_QUANTITIES } from '~~/utils/result-units'
 
 interface Point {
   ts: string
@@ -30,7 +31,7 @@ const props = withDefaults(
     codeToLabel: Record<string, string>
     /** 图表显示模式 */
     displayMode?: EnergyFlowDisplayMode
-    /** 当前时层步长（分钟），用于将功率积分为累计电量 */
+    /** 当前时层步长（分钟），用于将功率/流量积分为对应累计量 */
     timeStepMinutes?: number
     simStartTime?: string
     simEndTime?: string | null
@@ -47,6 +48,10 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:displayWindow': [value: ChartDisplayWindow]
 }>()
+
+const flowQuantity = computed(() => (
+  RESULT_FLOW_QUANTITIES[getResultFlowMedium(props.variables[0] ?? '')]
+))
 
 // ───── 变量解析辅助 ─────
 
@@ -65,9 +70,12 @@ function getSign(varName: string): number {
   return 0
 }
 
-/** 分时电负荷变量；实例 code 和端口方向可能出现在后缀中 */
-function isElectricLoadVariable(varName: string): boolean {
-  return varName === 'E_ELOAD' || varName.startsWith('E_ELOAD_')
+/** 按稳定变量前缀识别各介质负荷，实例 code 和端口方向可出现在后缀中。 */
+function getLoadLabel(varName: string): string | null {
+  if (/^E_ELOAD(?:_|$)/.test(varName)) return '电负荷'
+  if (/^H_HLOAD(?:_|$)/.test(varName)) return '氢负荷'
+  if (/^Q_QLOAD(?:_|$)/.test(varName)) return '热负荷'
+  return null
 }
 
 /** 获取设备显示名称 */
@@ -76,7 +84,7 @@ function getDeviceName(varName: string): string {
   return props.codeToLabel[code] ?? code
 }
 
-/** 补充双向设备的功率方向，避免同一设备在图例中出现同名系列 */
+/** 补充双向设备的流向，避免同一设备在图例中出现同名系列 */
 function getSeriesName(varName: string): string {
   const deviceName = getDeviceName(varName)
   if (/^E_GRID_in(?:_|$)/.test(varName)) return `${deviceName}（售电）`
@@ -85,6 +93,8 @@ function getSeriesName(varName: string): string {
   if (/^H_HGRID_out(?:_|$)/.test(varName)) return `${deviceName}（购氢）`
   if (/^E_(?:ES|PS|FS|CS)_in(?:_|$)/.test(varName)) return `${deviceName}（充电）`
   if (/^E_(?:ES|PS|FS|CS)_out(?:_|$)/.test(varName)) return `${deviceName}（放电）`
+  if (/^H_HS_in(?:_|$)/.test(varName)) return `${deviceName}（充氢）`
+  if (/^H_HS_out(?:_|$)/.test(varName)) return `${deviceName}（放氢）`
   return deviceName
 }
 
@@ -119,10 +129,11 @@ function getVarData(varName: string): Point[] {
 
 const sourceVars = computed(() => props.variables.filter(v => getSign(v) > 0))
 const sinkVars = computed(() => props.variables.filter(v => getSign(v) < 0))
-const electricLoadVars = computed(() => props.variables.filter(isElectricLoadVariable))
+const loadVars = computed(() => props.variables.filter(v => getLoadLabel(v) !== null))
+const loadLabel = computed(() => getLoadLabel(loadVars.value[0] ?? '') ?? '负荷')
 const displayedSinkVars = computed(() => (
   props.displayMode === 'loadTracking'
-    ? sinkVars.value.filter(v => !isElectricLoadVariable(v))
+    ? sinkVars.value.filter(v => getLoadLabel(v) === null)
     : sinkVars.value
 ))
 
@@ -185,7 +196,7 @@ const updateDateRangeEnd = (value: number): void => {
   })
 }
 
-// ───── 累计电量贡献度：源/荷分别计算 ─────
+// ───── 累计电量/热量/氢量贡献度：源/荷分别计算 ─────
 
 interface ContributionItem {
   name: string
@@ -208,11 +219,11 @@ function calcContribution(vars: string[]): ContributionItem[] {
       return m >= startMin && m < endMin
     })
     const stepHours = props.timeStepMinutes / 60
-    const totalEnergy = data.reduce((sum, p) => sum + Math.abs(p.value) * stepHours, 0)
+    const totalAmount = data.reduce((sum, p) => sum + Math.abs(p.value) * stepHours, 0)
     const current = deviceMap.get(code)
     deviceMap.set(code, {
       name: current?.name ?? getSeriesName(varName),
-      value: (current?.value ?? 0) + totalEnergy,
+      value: (current?.value ?? 0) + totalAmount,
       color: current?.color ?? getSeriesColor(varName)
     })
   }
@@ -364,7 +375,7 @@ const hasRenewableDevices = computed(() => (
   renewableDeviceCodes.value.wt.length > 0 || renewableDeviceCodes.value.pv.length > 0
 ))
 
-// ───── 明细：源/荷环形图与设备电量构成 ─────
+// ───── 明细：源/荷环形图与对应介质的累计量构成 ─────
 
 const showDetails = ref(false)
 const sourceDonutRef = ref<HTMLDivElement | null>(null)
@@ -387,7 +398,7 @@ function donutOption(centerLabel: '源' | '荷', items: ContributionItem[]): ech
     animation: false,
     tooltip: {
       trigger: 'item',
-      formatter: hasData ? '{b}<br/>{c} kWh（{d}%）' : '暂无数据'
+      formatter: hasData ? `{b}<br/>{c} ${flowQuantity.value.totalUnit}（{d}%）` : '暂无数据'
     },
     legend: {
       type: 'scroll',
@@ -538,9 +549,9 @@ const renderChart = () => {
     })
   }
 
-  if (props.displayMode === 'loadTracking' && electricLoadVars.value.length > 0) {
+  if (props.displayMode === 'loadTracking' && loadVars.value.length > 0) {
     const totalLoadByTime = new Map<number, number>()
-    for (const varName of electricLoadVars.value) {
+    for (const varName of loadVars.value) {
       const data = getVarData(varName).filter(p => {
         const m = timeLabelToMinutes(p.ts)
         return m >= startMin && m < endMin
@@ -553,7 +564,7 @@ const renderChart = () => {
 
     series.push({
       type: 'line',
-      name: '电负荷',
+      name: loadLabel.value,
       data: allTs.map(minute => totalLoadByTime.has(minute) ? totalLoadByTime.get(minute)! : null),
       smooth: false,
       symbol: 'none',
@@ -571,7 +582,7 @@ const renderChart = () => {
       top: 4,
       left: 'center',
       data: [...new Set(series.map(item => String(item.name ?? '')))].map(name =>
-        name === '电负荷' && props.displayMode === 'loadTracking'
+        name === loadLabel.value && props.displayMode === 'loadTracking'
           ? { name, icon: SOLID_LINE_LEGEND_ICON }
           : name
       ),
@@ -597,14 +608,14 @@ const renderChart = () => {
     },
     yAxis: {
       type: 'value',
-      name: '功率（kW）',
+      name: `${flowQuantity.value.rateLabel}（${flowQuantity.value.rateUnit}）`,
       nameLocation: 'end',
       nameGap: 12,
       nameTextStyle: { fontSize: 12, color: '#344054' },
       axisLabel: {
         fontSize: 12,
         formatter: (value: number) => {
-          const label = value === 0 ? '0 kW' : Math.abs(value).toLocaleString('zh-CN')
+          const label = value === 0 ? `0 ${flowQuantity.value.rateUnit}` : Math.abs(value).toLocaleString('zh-CN')
           if (value > 0) return `{source|${label}}`
           if (value < 0) return `{sink|-${label}}`
           return `{zero|${label}}`
@@ -627,7 +638,7 @@ const renderChart = () => {
         for (const p of arr) {
           const val = typeof p.data === 'number' ? p.data : 0
           if (Math.abs(val) < 0.01) continue
-          html += `<br/><span style="color:${p.color ?? ''}">●</span> ${p.seriesName ?? ''}: ${val.toFixed(1)} kW`
+          html += `<br/><span style="color:${p.color ?? ''}">●</span> ${p.seriesName ?? ''}: ${val.toFixed(1)} ${flowQuantity.value.rateUnit}`
         }
         return html
       }
@@ -682,7 +693,7 @@ onBeforeUnmount(() => {
 <template>
   <div ref="containerRef" class="space-y-3">
     <div class="flex items-center justify-between gap-4 px-1">
-      <h3 class="text-base font-medium text-app-text">{{ busLabel }} · 功率</h3>
+      <h3 class="text-base font-medium text-app-text">{{ busLabel }} · {{ flowQuantity.rateLabel }}</h3>
       <AppButton
         :label="showDetails ? '收起明细' : '查看明细'"
         tone="primary"
@@ -753,8 +764,8 @@ onBeforeUnmount(() => {
               <thead class="bg-app-panel-soft text-left text-app-muted">
                 <tr class="border-b border-app-border">
                   <th class="px-4 py-3 font-medium text-red-700">源侧设备名称</th>
-                  <th class="px-4 py-3 text-right font-medium text-red-700">累计电量(kWh)</th>
-                  <th class="px-4 py-3 text-right font-medium text-red-700">电量占比(%)</th>
+                  <th class="px-4 py-3 text-right font-medium text-red-700">{{ flowQuantity.totalLabel }}({{ flowQuantity.totalUnit }})</th>
+                  <th class="px-4 py-3 text-right font-medium text-red-700">{{ flowQuantity.shareLabel }}(%)</th>
                 </tr>
               </thead>
               <tbody>
@@ -789,8 +800,8 @@ onBeforeUnmount(() => {
               <thead class="bg-app-panel-soft text-left text-app-muted">
                 <tr class="border-b border-app-border">
                   <th class="px-4 py-3 font-medium text-blue-700">荷侧设备名称</th>
-                  <th class="px-4 py-3 text-right font-medium text-blue-700">累计电量(kWh)</th>
-                  <th class="px-4 py-3 text-right font-medium text-blue-700">电量占比(%)</th>
+                  <th class="px-4 py-3 text-right font-medium text-blue-700">{{ flowQuantity.totalLabel }}({{ flowQuantity.totalUnit }})</th>
+                  <th class="px-4 py-3 text-right font-medium text-blue-700">{{ flowQuantity.shareLabel }}(%)</th>
                 </tr>
               </thead>
               <tbody>

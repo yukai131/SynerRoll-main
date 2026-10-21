@@ -55,14 +55,14 @@ export const VARIABLE_DISPLAY_NAMES: Record<string, Record<string, string>> = {
   WT: { E_WT: '输出功率', E_WT_cut: '弃风功率', AVAILABLE_WT: '可用功率' },
   PV: { E_PV: '输出功率', E_PV_cut: '弃光功率' },
   ES: { E_ES: '储量', E_ES_in: '充电功率', E_ES_out: '放电功率' },
-  HS: { H_HS: '储量', H_HS_in: '充氢功率', H_HS_out: '放氢功率' },
+  HS: { H_HS: '储氢量', H_HS_in: '充氢流量', H_HS_out: '放氢流量' },
   PS: { E_PS: '储量', E_PS_in: '充电功率', E_PS_out: '放电功率' },
   FS: { E_FS: '储量', E_FS_in: '充电功率', E_FS_out: '放电功率' },
   CS: { E_CS: '储量', E_CS_in: '充气功率', E_CS_out: '放气功率' },
   GP: { E_GP: '输出功率', F_GP: '消耗燃料' },
   CP: { E_CP: '输出功率', F_CP: '消耗燃料' },
   CHP: { E_CHP: '发电功率', Q_CHP: '供热功率', F_CHP: '消耗燃料' },
-  ET: { E_ET: '耗电功率', H_ET: '产氢功率' },
+  ET: { E_ET: '耗电功率', H_ET: '产氢流量' },
   ELOAD: { E_ELOAD: '电负荷' },
   HLOAD: { H_HLOAD: '氢负荷' },
   QLOAD: { Q_QLOAD: '热负荷' },
@@ -70,7 +70,11 @@ export const VARIABLE_DISPLAY_NAMES: Record<string, Record<string, string>> = {
   HGRID: { H_HGRID_in: '上送流量', H_HGRID_out: '购入流量' },
   HYDRO: { E_HYDRO: '输出功率', AVAILABLE_HYDRO: '可用功率', MINIMUM_HYDRO: '最小出力' },
   // 松弛变量
-  BUS: { E_SHORTAGE: '缺额功率', E_EXCESS: '过剩功率' },
+  BUS: {
+    E_SHORTAGE: '缺额功率', E_EXCESS: '过剩功率',
+    H_SHORTAGE: '缺额氢流量', H_EXCESS: '过剩氢流量',
+    Q_SHORTAGE: '缺额热功率', Q_EXCESS: '过剩热功率'
+  },
 }
 
 /**

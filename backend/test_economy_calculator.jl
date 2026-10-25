@@ -93,6 +93,16 @@ using Test
     @test length(slack) == 1
     @test slack[1].value ≈ 300.0
     @test slack[1].is_slack
+
+    # 浮点噪声不得记为松弛（否则 hasSlack 误报能量不平衡）
+    noise = calc_slack_penalty("b1", "总线", [0.0], [6.4e-18, 2.1e-23], 100.0, 50.0, "1")
+    @test isempty(noise)
+    @test !is_meaningful_slack(9.1e-17)
+    @test is_meaningful_slack(1.0e-3)
+    # 真实松弛仍入账
+    real = calc_slack_penalty("b1", "总线", [0.0], [0.5], 100.0, 50.0, "1")
+    @test length(real) == 1
+    @test real[1].value ≈ 0.5 * 50.0
     @test !slack[1].in_objective
 
     # HYDRO 走 thermal

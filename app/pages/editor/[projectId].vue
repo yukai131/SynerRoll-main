@@ -2,14 +2,26 @@
 import type { CanvasClipboard, CanvasData, CanvasSelection, FlowNode } from '~~/types/canvas'
 import type { Project } from '~~/types/project'
 import type { AlgorithmConfig, LayerDefinition } from '~~/types/simulation'
+import type { ToolbarButtonStatus } from '~~/config/system-config'
 
 import { componentDefinitionMap } from '~~/config/component-meta'
 import { editorMenus, toolbarConfig } from '~~/config/system-config'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
+import { useTaskApi } from '~~/composables/api/useTaskApi'
+import { useCapacityPlanningApi } from '~~/composables/api/useCapacityPlanningApi'
 import { useEditorHistory } from '~~/state/editor'
 import { useProjectCache } from '~~/state/project'
 import { useEditorUiState, useToastCenter } from '~~/state/ui'
 import { buildBackendPayload } from '~~/utils/backend-export'
+import {
+  CAPACITY_TASK_VOCAB,
+  COMPUTE_TASK_VOCAB,
+  resolveTaskIndicator,
+  type TaskIndicator
+} from '~~/utils/task-status'
+import {
+  resolveBoundaryDataStatus
+} from '~~/utils/boundary-data-status'
 import {
   alignSelectedNodes,
   appendCanvas,
@@ -64,8 +76,6 @@ const showLayerConfigModal = ref(false)
 // 算法配置弹窗
 const showAlgorithmConfigModal = ref(false)
 
-// [废弃 2026-07-14] 仿真解析弹窗 — 功能已迁移到计算任务系统
-// const showSimulationParseModal = ref(false)
 
 const handleLayerConfigConfirm = async (layers: LayerDefinition[]) => {
   if (!project.value) {
@@ -105,9 +115,8 @@ const { data, pending, error } = await useAsyncData(
   `editor-project-${projectId.value}`,
   () => projectApi.getProject(projectId.value),
   {
-    // 客户端再次进入同一项目时复用已有结果，避免重复请求；
-    // refreshNuxtData（边界页返回）仍会强制拉取最新数据。
-    getCachedData: (key, nuxtApp) => nuxtApp.payload.data[key]
+    // 每次进入都取服务端最新，避免边界页/浏览器后退时命中陈旧缓存导致关联显示为空
+    getCachedData: () => undefined
   }
 )
 
@@ -173,8 +182,8 @@ const toolbarValues = computed<Record<string, string | number | boolean>>(() => 
     })(),
     'grid-size': String(gridSize),
     'grid-type': gridType,
-    'show-component-name': activeCanvas.value?.pageConfig.showComponentName ?? true,
-    'show-parameter-tag': activeCanvas.value?.pageConfig.showParameterTag ?? false,
+    'show-component-name': activeCanvas.value?.pageConfig.showComponentName ?? false,
+    'show-parameter-tag': activeCanvas.value?.pageConfig.showParameterTag ?? true,
     'show-ports': activeCanvas.value?.pageConfig.showPorts ?? false,
     'label-language': activeCanvas.value?.pageConfig.labelLanguage ?? 'chinese',
     'rotation-input': selectedNode.value?.data.style.rotation ?? 0,
@@ -193,6 +202,78 @@ interface ToolbarActionPayload {
 }
 
 const toolbarGroups = computed(() => toolbarConfig[uiState.value.activeMenu])
+
+// ── 工具栏状态角标 ─────────────────────────────────────────────
+const taskApi = useTaskApi()
+const capacityApi = useCapacityPlanningApi()
+const dbHasDataIds = ref<Set<string>>(new Set())
+const computeTaskIndicator = ref<TaskIndicator | null>(null)
+const capacityTaskIndicator = ref<TaskIndicator | null>(null)
+let taskStatusTimer: ReturnType<typeof setInterval> | null = null
+
+const refreshBoundaryDbStatus = async () => {
+  if (!projectId.value) return
+  try {
+    const res = await projectApi.getBoundaryStatus(projectId.value)
+    dbHasDataIds.value = new Set(res?.boundaryIds ?? [])
+  }
+  catch (err) {
+    console.error('[Editor] 查询边界入库状态失败', err)
+  }
+}
+
+const refreshTaskIndicators = async () => {
+  if (!projectId.value) return
+  try {
+    const [computeRes, capacityRes] = await Promise.all([
+      taskApi.listTasks({ projectId: projectId.value }).catch(() => null),
+      capacityApi.listPlannings(projectId.value).catch(() => null)
+    ])
+    const computeTasks = (computeRes?.tasks ?? []).map(t => ({
+      status: t.status,
+      createdAt: t.created_at
+    }))
+    const capacityTasks = (capacityRes?.tasks ?? []).map(t => ({
+      status: t.status,
+      createdAt: t.createdAt
+    }))
+    computeTaskIndicator.value = resolveTaskIndicator(computeTasks, COMPUTE_TASK_VOCAB)
+    capacityTaskIndicator.value = resolveTaskIndicator(capacityTasks, CAPACITY_TASK_VOCAB)
+  }
+  catch (err) {
+    console.error('[Editor] 查询任务状态失败', err)
+  }
+}
+
+const readyBoundaryCount = computed(() => {
+  const boundaries = project.value?.boundaries ?? []
+  let n = 0
+  for (const b of boundaries) {
+    if (resolveBoundaryDataStatus(b, dbHasDataIds.value.has(b.id)) === 'ready') n += 1
+  }
+  return n
+})
+
+const layerCount = computed(() => project.value?.layerConfig?.layers?.length ?? 0)
+
+const toolbarStatuses = computed<Record<string, ToolbarButtonStatus | undefined>>(() => {
+  const slackOn = Boolean(project.value?.algorithm?.slackEnabled)
+  const simDot = computeTaskIndicator.value
+  const capDot = capacityTaskIndicator.value
+  return {
+    'boundary-config': { kind: 'count', value: readyBoundaryCount.value },
+    'layer-config': { kind: 'text', value: `${layerCount.value}层` },
+    'algorithm-config': { kind: 'dot', tone: slackOn ? 'green' : 'gray' },
+    // 无状态时不显示点（五分钟外非求解中不标注）
+    'simulation-parse': simDot
+      ? { kind: 'dot', tone: simDot.tone, blink: simDot.blink }
+      : undefined,
+    'capacity-planning': capDot
+      ? { kind: 'dot', tone: capDot.tone, blink: capDot.blink }
+      : undefined
+  }
+})
+
 const zoomPercent = computed(() => Math.round((activeCanvas.value?.viewport.zoom ?? 1) * 100))
 const editorRailWidth = computed(() => (uiState.value.leftCollapsed ? 54 : 320))
 const propertiesRailWidth = computed(() => (uiState.value.rightCollapsed ? 54 : 320))
@@ -201,7 +282,7 @@ const contentGridStyle = computed(() => ({
 }))
 
 useHead(() => ({
-  title: project.value ? `${project.value.name} - SynerRoll` : 'SynerRoll 编辑器'
+  title: project.value ? `${project.value.name} - 新能源发电系统灵活性量化评估软件` : '新能源发电系统灵活性量化评估软件 编辑器'
 }))
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -222,6 +303,21 @@ const syncWorkspaceWithBoundaries = (workspace: Project['workspace']) => {
   return syncBoundaryStateFromNodes(workspace, project.value.boundaries ?? [])
 }
 
+const persistWorkspaceAndBoundaries = async () => {
+  if (!project.value) return
+  try {
+    await projectApi.saveCanvas(project.value.id, {
+      workspace: project.value.workspace
+    })
+    await projectApi.saveBoundaries(project.value.id, project.value.boundaries, project.value.fittingModels)
+  }
+  catch (saveError) {
+    console.error(saveError)
+    push({ tone: 'danger', title: '自动保存失败', description: '请稍后重试。' })
+    throw saveError
+  }
+}
+
 const scheduleSave = () => {
   if (!project.value) {
     return
@@ -232,21 +328,24 @@ const scheduleSave = () => {
   }
 
   saveTimer = setTimeout(async () => {
-    if (!project.value) {
-      return
-    }
-
-    try {
-      await projectApi.saveCanvas(project.value.id, {
-        workspace: project.value.workspace
-      })
-      await projectApi.saveBoundaries(project.value.id, project.value.boundaries, project.value.fittingModels)
-    }
-    catch (saveError) {
-      console.error(saveError)
-      push({ tone: 'danger', title: '自动保存失败', description: '请稍后重试。' })
-    }
+    saveTimer = null
+    await persistWorkspaceAndBoundaries().catch(() => {})
   }, 600)
+}
+
+/** 跨页跳转前强制落盘，避免边界页用陈旧 workspace 回写覆盖 */
+const flushSave = async () => {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  if (!project.value) return
+  try {
+    await persistWorkspaceAndBoundaries()
+  }
+  catch {
+    // 失败已 toast；仍允许跳转，目标页强制拉最新兜底
+  }
 }
 
 const applyWorkspace = (workspace: Project['workspace']) => {
@@ -316,7 +415,7 @@ const copyCurrentSelection = () => {
   return true
 }
 
-const handleToolbarAction = (
+const handleToolbarAction = async (
   action: string | ToolbarActionPayload,
   value?: string | number | boolean
 ) => {
@@ -641,11 +740,13 @@ const handleToolbarAction = (
   }
 
   if (actionKey === 'goto-simulation') {
+    await flushSave()
     navigateTo(`/simulation/${project.value.id}`)
     return
   }
 
   if (actionKey === 'goto-result') {
+    await flushSave()
     navigateTo(`/result/${project.value.id}`)
     return
   }
@@ -661,12 +762,14 @@ const handleToolbarAction = (
   }
 
   if (actionKey === 'boundary-config') {
+    await flushSave()
     navigateTo(`/boundary/${projectId.value}`)
     return
   }
 
   if (actionKey === 'simulation-parse') {
     // 计算任务方案：仿真计算 → 跳转到任务页，预填 projectId/canvasId
+    await flushSave()
     const canvas = activeCanvas.value
     const qs = new URLSearchParams()
     if (projectId.value) qs.set('projectId', projectId.value)
@@ -676,6 +779,7 @@ const handleToolbarAction = (
   }
 
   if (actionKey === 'capacity-planning') {
+    await flushSave()
     const qs = new URLSearchParams({ canvasId: activeCanvas.value.id })
     void navigateTo(`/capacity-planning/${project.value.id}?${qs}`)
     return
@@ -876,11 +980,19 @@ const handleKeydown = (event: KeyboardEvent) => {
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('fullscreenchange', syncFullscreenState)
+  void refreshBoundaryDbStatus()
+  void refreshTaskIndicators()
+  taskStatusTimer = setInterval(() => {
+    void refreshTaskIndicators()
+    void refreshBoundaryDbStatus()
+  }, 10000)
 })
 
 onActivated(() => {
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('fullscreenchange', syncFullscreenState)
+  void refreshBoundaryDbStatus()
+  void refreshTaskIndicators()
   nextTick(() => {
     void canvasWorkspaceRef.value?.refreshLayout()
   })
@@ -894,6 +1006,10 @@ onDeactivated(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('fullscreenchange', syncFullscreenState)
+  if (taskStatusTimer) {
+    clearInterval(taskStatusTimer)
+    taskStatusTimer = null
+  }
 })
 </script>
 
@@ -909,13 +1025,14 @@ onBeforeUnmount(() => {
         未找到对应项目，或项目数据已经损坏。
       </p>
       <div class="mt-4">
-        <AppButton label="返回项目页" icon="arrow" tone="primary" @click="navigateTo('/project')" />
+        <AppButton label="返回项目页" tone="primary" @click="navigateTo('/project')" />
       </div>
     </section>
   </div>
 
   <div v-else class="flex h-screen flex-col overflow-hidden bg-app-surface">
     <EditorHeader
+      logo-src="/editor-logo.png"
       :project-name="project.name"
       :is-fullscreen="isFullscreen"
       @navigate-home="navigateTo('/project')"
@@ -936,6 +1053,7 @@ onBeforeUnmount(() => {
       <EditorToolbar
         :groups="toolbarGroups"
         :values="toolbarValues"
+        :statuses="toolbarStatuses"
         @action="handleToolbarAction"
       />
       
@@ -1011,16 +1129,9 @@ onBeforeUnmount(() => {
       @confirm="handleAlgorithmConfigConfirm"
     />
 
-    <!-- [废弃 2026-07-14] 仿真解析弹窗 — 功能已迁移到计算任务系统 -->
     <ProductDocsPanel
       v-if="showProductDocs"
       @close="showProductDocs = false"
     />
-
-    <!-- <SimulationParseModal
-      :open="showSimulationParseModal"
-      :project-id="projectId"
-      @close="showSimulationParseModal = false"
-    /> -->
   </div>
 </template>

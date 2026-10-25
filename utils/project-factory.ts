@@ -1,5 +1,6 @@
 import type { Project, ProjectSummary } from '~~/types/project'
 import { DEFAULT_LAYER_CONFIG } from '~~/types/simulation'
+import brand from '~~/config/brand.json'
 
 import { createInitialWorkspace, normalizeCanvasBusNodes } from './canvas'
 import { deepClone } from './clone'
@@ -14,7 +15,7 @@ export const createEmptyProject = (name: string, description?: string): Project 
     createTime: new Date().toISOString(),
     updateTime: new Date().toISOString(),
     description,
-    owner: 'LYDL',
+    owner: brand.publisher,
     favorite: false,
     tags: ['综合能源'],
     status: 'draft',

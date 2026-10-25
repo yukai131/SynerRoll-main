@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'">
+  <title>正在启动</title>
+  <style>
+    body { margin: 0; height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #f5f7fa; color: #333; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; -webkit-app-region: drag; }
+    img { width: 72px; height: 72px; border-radius: 12px; box-shadow: 0 4px 12px #0000001a; }
+    h1 { font-size: 20px; color: #0a4da2; font-weight: 600; margin: 18px 12px 8px; text-align: center; }
+    .publisher { font-size: 12px; color: #666; margin: 0 0 24px; }
+    .status { display: flex; align-items: center; gap: 10px; font-size: 14px; color: #666; }
+    .spinner { width: 15px; height: 15px; border: 2px solid #dbe8f3; border-top-color: #0079c2; border-radius: 50%; animation: spin 1s linear infinite; }
+    small { font-size: 12px; color: #8a94a5; margin-top: 15px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <img src="logo.png" alt="软件图标">
+  <h1 id="appTitle">新能源发电系统灵活性量化评估软件</h1>
+  <p class="publisher" id="publisher"></p>
+  <div class="status" role="status"><span class="spinner" aria-hidden="true"></span>正在启动计算服务，请稍候…</div>
+  <small id="version"></small>
+  <script src="startup.js"></script>
+</body>
+</html>

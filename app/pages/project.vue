@@ -289,8 +289,8 @@ const importProject = async (event: Event) => {
           <h1 class="text-2xl font-bold text-app-text">项目管理</h1>
         </div>
         <div class="flex items-center gap-2">
-          <AppButton label="新建项目" icon="package" tone="neutral" data-testid="open-project-template-dialog" @click="openCreateDialog" />
-          <AppButton label="导入项目" icon="download" tone="primary" @click="fileInputRef?.click()" />
+          <AppButton label="新建项目" tone="neutral" data-testid="open-project-template-dialog" @click="openCreateDialog" />
+          <AppButton label="导入项目" tone="primary" @click="fileInputRef?.click()" />
           <input ref="fileInputRef" class="hidden" type="file" accept=".json" @change="importProject">
         </div>
       </div>
@@ -323,10 +323,10 @@ const importProject = async (event: Event) => {
             >
           </div>
           <div class="flex items-center gap-2">
-            <AppButton label="重命名" icon="docs" tone="neutral" :disabled="selectedIsBuiltInScenario" @click="renameProject" />
-            <AppButton label="复制" icon="copy" tone="neutral" :disabled="!selectedProject" data-testid="copy-project" @click="openCopyDialog" />
-            <AppButton label="导出" icon="download" tone="neutral" @click="exportProject" />
-            <AppButton label="删除" icon="delete" tone="danger" :disabled="selectedIsBuiltInScenario" @click="deleteProject" />
+            <AppButton label="重命名" tone="neutral" :disabled="selectedIsBuiltInScenario" @click="renameProject" />
+            <AppButton label="复制" tone="neutral" :disabled="!selectedProject" data-testid="copy-project" @click="openCopyDialog" />
+            <AppButton label="导出" tone="neutral" @click="exportProject" />
+            <AppButton label="删除" tone="danger" :disabled="selectedIsBuiltInScenario" @click="deleteProject" />
           </div>
         </div>
 
@@ -416,7 +416,7 @@ const importProject = async (event: Event) => {
               </div>
             </div>
 
-            <AppButton label="开始系统建模" icon="play" tone="primary" class="w-full justify-center" @click="navigateTo(`/editor/${selectedProject.id}`)" />
+            <AppButton label="开始系统建模" tone="primary" class="w-full justify-center" @click="navigateTo(`/editor/${selectedProject.id}`)" />
           </div>
         </template>
 

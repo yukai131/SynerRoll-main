@@ -8,6 +8,7 @@ import {
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { getDeviceColor } from '~~/config/device-colors'
 import AppModal from '~/components/AppModal.vue'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
 const DEFICIT_COLOR = '#F04438'
@@ -86,9 +87,16 @@ const directionRows = computed(() => props.rows
   .slice()
   .sort((a, b) => timeLabelToMinutes(a.timestamp) - timeLabelToMinutes(b.timestamp)))
 
+/** 业务指标仍按共享细窗计算，与原 DualRangeSlider 口径一致 */
 const visibleRows = computed(() => directionRows.value.filter(row => {
   const timestamp = timeLabelToMinutes(row.timestamp)
   return timestamp >= rangeStartMinutes.value && timestamp < rangeEndMinutes.value
+}))
+
+/** 图序列覆盖日期粗窗，细窗由 dataZoom 控制 */
+const domainRows = computed(() => directionRows.value.filter(row => {
+  const timestamp = timeLabelToMinutes(row.timestamp)
+  return timestamp >= zoomDomain.value.start && timestamp < zoomDomain.value.end
 }))
 
 const selectedDeficitRow = computed(() => directionRows.value.find(row =>
@@ -153,7 +161,7 @@ function formatPower(value: unknown): string {
 }
 
 function showDeficitDetail(index: number): void {
-  const row = visibleRows.value[index]
+  const row = domainRows.value[index]
   if (!row || Number(row.margin) >= 0) return
   selectedDeficitTimestamp.value = row.timestamp
   deficitDetailOpen.value = true
@@ -164,7 +172,7 @@ async function viewSelectedContribution(): Promise<void> {
   deficitDetailOpen.value = false
   await nextTick()
   contributionChartRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  const dataIndex = visibleRows.value.findIndex(row => row.timestamp === selectedDeficitTimestamp.value)
+  const dataIndex = domainRows.value.findIndex(row => row.timestamp === selectedDeficitTimestamp.value)
   if (dataIndex >= 0) contributionChart?.dispatchAction({ type: 'showTip', seriesIndex: 0, dataIndex })
 }
 
@@ -197,14 +205,6 @@ const sliderMax = computed(() => {
   )
 })
 
-const updateRangeStart = (value: number) => {
-  emit('update:displayWindow', { ...props.displayWindow, start: value })
-}
-
-const updateRangeEnd = (value: number) => {
-  emit('update:displayWindow', { ...props.displayWindow, end: value })
-}
-
 const updateDateRangeStart = (value: number) => {
   emit('update:displayWindow', {
     ...props.displayWindow,
@@ -222,6 +222,21 @@ const updateDateRangeEnd = (value: number) => {
     end: value
   })
 }
+
+const zoomDomain = computed(() => ({
+  start: dateRangeStartMinutes.value,
+  end: Math.max(dateRangeStartMinutes.value + 1, dateRangeEndMinutes.value)
+}))
+
+const sharedZoom = useSharedDataZoom({
+  getChart: () => chart,
+  getPeerCharts: () => [contributionChart],
+  getWindow: () => ({ start: rangeStartMinutes.value, end: rangeEndMinutes.value }),
+  getDomain: () => zoomDomain.value,
+  onWindowChange: (win) => {
+    emit('update:displayWindow', { ...props.displayWindow, start: win.start, end: win.end })
+  }
+})
 
 const contributionColorByDevice = computed(() => {
   const keys = new Set<string>()
@@ -269,7 +284,7 @@ interface ContributionStackSeries {
 
 const contributionStackSeries = computed<ContributionStackSeries[]>(() => contributionTypeKeys.value
   .map((deviceType) => {
-    const data = visibleRows.value.map((row) => {
+    const data = domainRows.value.map((row) => {
       let hasValue = false
       let total = 0
       for (const device of row.device_results ?? []) {
@@ -346,7 +361,7 @@ const emitAxisTimestamp = (event: { axesInfo?: Array<{ value?: string | number }
 
   const timestamp = typeof axisValue === 'string'
     ? axisValue
-    : visibleRows.value[Math.round(Number(axisValue))]?.timestamp
+    : domainRows.value[Math.round(Number(axisValue))]?.timestamp
   emit('hoverTimestamp', timestamp ?? null)
 }
 
@@ -371,7 +386,7 @@ const formatContributionTooltip = (params: unknown): string => {
   const axisValue = items[0]?.axisValue
   const timelineIndex = items[0]?.dataIndex ?? (typeof axisValue === 'number'
     ? axisValue
-    : visibleRows.value.findIndex(row => row.timestamp === String(axisValue ?? items[0]?.axisValueLabel ?? '')))
+    : domainRows.value.findIndex(row => row.timestamp === String(axisValue ?? items[0]?.axisValueLabel ?? '')))
   const fullTotal = timelineIndex >= 0
     ? contributionStackSeries.value.reduce((sum, series) => {
         const value = series.data[timelineIndex]
@@ -407,7 +422,7 @@ const renderSystemChart = () => {
   if (!chartRef.value) return
   chart ??= echarts.init(chartRef.value)
 
-  const rows = visibleRows.value
+  const rows = domainRows.value
 
   // 负裕度叠加层在相邻采样值跨越零线时插入交点，避免孤立缺额只剩一个红点。
   const positiveMargin: Array<[number, number] | null> = []
@@ -453,7 +468,8 @@ const renderSystemChart = () => {
       textStyle: { fontSize: 12 },
       formatter: (name: string) => name === '裕度' ? '裕度（负值标红）' : name
     },
-    grid: { left: 52, right: 18, top: 38, bottom: 38 },
+    grid: { left: 52, right: 18, top: 38, bottom: 48 },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'value',
       min: 0,
@@ -534,7 +550,7 @@ const renderContributionChart = () => {
   if (!contributionChartRef.value) return
   contributionChart ??= echarts.init(contributionChartRef.value)
 
-  const timeline = visibleRows.value.map(row => row.timestamp)
+  const timeline = domainRows.value.map(row => row.timestamp)
   const percentageMode = contributionDisplayMode.value === 'percentage'
   const totalByTimestamp = timeline.map((_, index) => contributionStackSeries.value.reduce((sum, item) => {
     const value = item.data[index]
@@ -554,7 +570,7 @@ const renderContributionChart = () => {
       : item.data,
     itemStyle: { color: item.color },
     emphasis: { focus: 'series' },
-    ...(index === 0 && selectedDeficitTimestamp.value && visibleRows.value.some(row => row.timestamp === selectedDeficitTimestamp.value)
+    ...(index === 0 && selectedDeficitTimestamp.value && domainRows.value.some(row => row.timestamp === selectedDeficitTimestamp.value)
       ? {
           markLine: {
             silent: true,
@@ -582,7 +598,8 @@ const renderContributionChart = () => {
       itemHeight: 8,
       textStyle: { fontSize: 11 }
     },
-    grid: { left: 52, right: 18, top: 38, bottom: 38 },
+    grid: { left: 52, right: 18, top: 38, bottom: 48 },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'category',
       data: timeline,
@@ -622,11 +639,15 @@ const renderContributionChart = () => {
 const render = () => {
   renderSystemChart()
   renderContributionChart()
+  sharedZoom.attachDataZoomEvents()
 }
 
 watch(
-  [() => props.rows, () => props.direction, rangeStartMinutes, rangeEndMinutes],
-  render
+  [() => props.rows, () => props.direction, rangeStartMinutes, rangeEndMinutes, dateRangeStartMinutes, dateRangeEndMinutes],
+  () => {
+    render()
+    sharedZoom.syncDataZoomFromWindow()
+  }
 )
 
 watch(contributionDisplayMode, renderContributionChart)
@@ -649,7 +670,7 @@ onMounted(() => {
     if (marginVisible.value && (params.seriesId === 'deficit-hit' || params.seriesId === 'negative-margin' || params.seriesId === 'margin')) {
       const x = Array.isArray(params.value) ? Number(params.value[0]) : params.dataIndex
       const candidates = [Math.floor(x), Math.ceil(x)]
-        .filter(index => Number(visibleRows.value[index]?.margin) < 0)
+        .filter(index => Number(domainRows.value[index]?.margin) < 0)
         .sort((left, right) => Math.abs(left - x) - Math.abs(right - x))
       if (candidates[0] !== undefined) showDeficitDetail(candidates[0])
     }
@@ -765,16 +786,6 @@ onBeforeUnmount(() => {
         :max="sliderMax"
         @update:start="updateDateRangeStart"
         @update:end="updateDateRangeEnd"
-      />
-      <PrimaryDualRangeSlider
-        :start="rangeStartMinutes"
-        :end="rangeEndMinutes"
-        :min="dateRangeStartMinutes"
-        :max="dateRangeEndMinutes"
-        :step="sliderStepMinutes"
-        :format-label="formatTimelineLabel"
-        @update:start="updateRangeStart"
-        @update:end="updateRangeEnd"
       />
     </div>
   </section>

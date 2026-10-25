@@ -9,8 +9,8 @@
         </p>
 
         <div class="mt-6 flex gap-3">
-          <AppButton label="返回项目管理" icon="arrow" tone="primary" @click="navigateTo('/project')" />
-          <AppButton label="系统设置" icon="settings" tone="neutral" @click="navigateTo('/settings')" />
+          <AppButton label="返回项目管理" tone="primary" @click="navigateTo('/project')" />
+          <AppButton label="系统设置" tone="neutral" @click="navigateTo('/settings')" />
         </div>
       </section>
     </div>

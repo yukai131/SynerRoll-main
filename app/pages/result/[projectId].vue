@@ -30,7 +30,7 @@ watchEffect(() => {
 const project = computed(() => projectState.value)
 
 useHead(() => ({
-  title: project.value ? `${project.value.name} - 结果分析` : '结果分析 - SynerRoll'
+  title: project.value ? `${project.value.name} - 结果分析` : '结果分析 - 新能源发电系统灵活性量化评估软件'
 }))
 
 const exportBackendPayload = () => {
@@ -52,8 +52,8 @@ const exportBackendPayload = () => {
           <p class="mt-1 text-sm text-app-muted">{{ project?.name || '正在加载项目' }}</p>
         </div>
         <div class="flex items-center gap-2">
-          <AppButton label="返回编辑器" icon="shape" tone="neutral" @click="navigateTo(`/editor/${projectId}`)" />
-          <AppButton label="导出载荷" icon="download" tone="primary" @click="exportBackendPayload" />
+          <AppButton label="返回编辑器" tone="neutral" @click="navigateTo(`/editor/${projectId}`)" />
+          <AppButton label="导出载荷" tone="primary" @click="exportBackendPayload" />
         </div>
       </div>
     </div>
@@ -95,7 +95,7 @@ const exportBackendPayload = () => {
         </div>
 
         <template #extra>
-          <AppButton label="前往算法配置" icon="play" tone="primary" @click="navigateTo(`/simulation/${projectId}`)" />
+          <AppButton label="前往算法配置" tone="primary" @click="navigateTo(`/simulation/${projectId}`)" />
         </template>
       </PanelSection>
     </div>

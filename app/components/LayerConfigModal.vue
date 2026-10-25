@@ -80,7 +80,6 @@ const handleCancel = () => {
       <div class="flex items-center justify-end">
         <AppButton
           label="新增时层"
-          icon="plus"
           size="md"
           tone="neutral"
           @click="handleAdd"
@@ -88,14 +87,14 @@ const handleCancel = () => {
       </div>
 
       <div class="rounded-lg border border-app-border">
-        <table class="w-full">
+        <table class="w-full table-fixed">
           <thead>
             <tr class="border-b border-app-border">
-              <th class="px-2 py-3 text-center text-sm font-bold text-app-text">时层名称</th>
-              <th class="px-2 py-3 text-center text-sm font-bold text-app-text">调度长度</th>
-              <th class="px-2 py-3 text-center text-sm font-bold text-app-text">调度步长</th>
-              <th class="px-2 py-3 text-center text-sm font-bold text-app-text">滚动步长</th>
-              <th class="px-4 py-3 text-center text-sm font-bold text-app-text">删除</th>
+              <th class="w-1/5 px-2 py-3 text-center text-sm font-bold text-app-text">时层名称</th>
+              <th class="w-1/5 px-2 py-3 text-center text-sm font-bold text-app-text">调度长度</th>
+              <th class="w-1/5 px-2 py-3 text-center text-sm font-bold text-app-text">调度步长</th>
+              <th class="w-1/5 px-2 py-3 text-center text-sm font-bold text-app-text">滚动步长</th>
+              <th class="w-1/5 px-2 py-3 text-center text-sm font-bold text-app-text">删除</th>
             </tr>
           </thead>
           <tbody>
@@ -134,7 +133,7 @@ const handleCancel = () => {
               <td class="px-2 py-3">
                 <PropertyNumber
                   :model-value="Number(layer.forward.replace(/\D/g, ''))"
-                  class="h-8 w-12 text-sm"
+                  class="h-8 w-24 text-sm"
                   unit="m"
                   :step="5"
                   :bordered="false"

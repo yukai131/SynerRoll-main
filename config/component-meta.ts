@@ -17,6 +17,11 @@ import type { BoundaryMeaning } from '~~/types/boundary'
 import componentLibraryData from './component-library.json'
 import { componentUIConfigs } from './component-ui-config'
 import { getDeviceColor } from './device-colors'
+import {
+  BASE_VAR_DISPLAY_NAMES,
+  parseResultSeriesKey,
+  type ResultSeriesMeta,
+} from './result-variables'
 
 // ============================================================
 // 组件分组定义
@@ -46,95 +51,50 @@ export const componentGroupMap = Object.fromEntries(
 ) as Record<ComponentGroupKey, ComponentGroup>
 
 // ============================================================
-// 优化变量中文名映射（用于结果分析页面图表显示）
-// key = 组件类型代码，value = { 变量基础名: 中文显示名 }
-// 变量基础名不含组件实例 code 后缀（如 E_WT_abc123 → E_WT）
+// 结果变量中文名与解析规则的唯一来源见 config/result-variables.ts（与 ResultBinding 闭环对齐）。
+// 此处仅保留兼容导出，内部一律委托 result-variables，不再维护第二套映射。
 // ============================================================
 
-export const VARIABLE_DISPLAY_NAMES: Record<string, Record<string, string>> = {
-  WT: { E_WT: '输出功率', E_WT_cut: '弃风功率', AVAILABLE_WT: '可用功率' },
-  PV: { E_PV: '输出功率', E_PV_cut: '弃光功率' },
-  ES: { E_ES: '储量', E_ES_in: '充电功率', E_ES_out: '放电功率' },
-  HS: { H_HS: '储氢量', H_HS_in: '充氢流量', H_HS_out: '放氢流量' },
-  PS: { E_PS: '储量', E_PS_in: '充电功率', E_PS_out: '放电功率' },
-  FS: { E_FS: '储量', E_FS_in: '充电功率', E_FS_out: '放电功率' },
-  CS: { E_CS: '储量', E_CS_in: '充气功率', E_CS_out: '放气功率' },
-  GP: { E_GP: '输出功率', F_GP: '消耗燃料' },
-  CP: { E_CP: '输出功率', F_CP: '消耗燃料' },
-  CHP: { E_CHP: '发电功率', Q_CHP: '供热功率', F_CHP: '消耗燃料' },
-  ET: { E_ET: '耗电功率', H_ET: '产氢流量' },
-  ELOAD: { E_ELOAD: '电负荷' },
-  HLOAD: { H_HLOAD: '氢负荷' },
-  QLOAD: { Q_QLOAD: '热负荷' },
-  GRID: { E_GRID_in: '上送功率', E_GRID_out: '购入功率' },
-  HGRID: { H_HGRID_in: '上送流量', H_HGRID_out: '购入流量' },
-  HYDRO: { E_HYDRO: '输出功率', AVAILABLE_HYDRO: '可用功率', MINIMUM_HYDRO: '最小出力' },
-  // 松弛变量
-  BUS: {
-    E_SHORTAGE: '缺额功率', E_EXCESS: '过剩功率',
-    H_SHORTAGE: '缺额氢流量', H_EXCESS: '过剩氢流量',
-    Q_SHORTAGE: '缺额热功率', Q_EXCESS: '过剩热功率'
-  },
-}
+export { BASE_VAR_DISPLAY_NAMES } from './result-variables'
+export { BASE_VAR_DISPLAY_NAMES as VARIABLE_DISPLAY_NAMES_FLAT } from './result-variables'
+
+/** @deprecated 请改用 result-variables 的 BASE_VAR_DISPLAY_NAMES / parseResultSeries */
+export const VARIABLE_DISPLAY_NAMES: Record<string, Record<string, string>> = (() => {
+  const nested: Record<string, Record<string, string>> = {}
+  for (const [base, name] of Object.entries(BASE_VAR_DISPLAY_NAMES)) {
+    // 兼容旧调用方的类型键（ELOAD/HLOAD/QLOAD）与 ResultBinding 标签（E_ELOAD/…）
+    const typeKeys = base.startsWith('E_ELOAD') || base === 'E_ELOAD'
+      ? ['E_ELOAD', 'ELOAD']
+      : base.startsWith('H_HLOAD') || base === 'H_HLOAD'
+        ? ['H_HLOAD', 'HLOAD']
+        : base.startsWith('Q_QLOAD') || base === 'Q_QLOAD'
+          ? ['Q_QLOAD', 'QLOAD']
+          : [base.split('_').slice(0, 2).join('_'), base.split('_')[0]!]
+    for (const typeKey of typeKeys) {
+      if (!typeKey) continue
+      nested[typeKey] ??= {}
+      nested[typeKey][base] = name
+    }
+  }
+  return nested
+})()
 
 /**
- * 从 sourceId|varName 的 key 中解析出组件类型和基础变量名
- * 例如 "ES|E_ES_out_7e77" → { componentType: "ES", baseVarName: "E_ES_out" }
- * @param knownCodes 可选，已知的节点 code 集合（如 ["7e8a", "7e77"]），用于从 varName 中剥离 code 后缀
+ * @deprecated 请使用 parseResultSeries / parseResultSeriesKey（闭环目录解析）
  */
 export function parseVariableKey(key: string, knownCodes?: string[]): { componentType: string; baseVarName: string } {
-  const [sourceId, varName] = key.split('|')
-  // sourceId 格式: "WT" 或 "ELOAD" 或 "ES_7e77" 或 "BUS" 或 "b_xxx"
-  // varName 格式: "E_WT_7e8a" 或 "E_ES_out_7e77" 或 "E_ELOAD_d0a4" 或 "irradiance"
-
-  // 智能匹配 sourceId → componentType：
-  // 1) 先试完整 sourceId（"WT", "ELOAD", "BUS"）
-  // 2) 再逐级缩短前缀（"ES_7e77" → 试 "ES_7e77" 失败 → 试 "ES"）
-  let sourceType = ''
-  const idParts = sourceId?.split('_') ?? []
-  for (let len = idParts.length; len >= 1; len--) {
-    const candidate = idParts.slice(0, len).join('_')
-    if (candidate in VARIABLE_DISPLAY_NAMES) {
-      sourceType = candidate
-      break
-    }
-  }
-  // 兜底：取第一段
-  if (!sourceType) sourceType = idParts[0] ?? ''
-
-  // 提取 code：优先从 sourceId 尾部（旧格式 "ES_7e77"），否则从 varName 尾部匹配
-  let sourceCode = ''
-  if (sourceType && sourceId !== sourceType) {
-    // sourceId 比 sourceType 长，多余部分就是 code（如 "ES_7e77" → sourceType="ES", code="7e77"）
-    sourceCode = sourceId.slice(sourceType.length + 1)
-  }
-  if (!sourceCode && knownCodes?.length && varName) {
-    for (const code of knownCodes) {
-      if (varName.endsWith(`_${code}`)) {
-        sourceCode = code
-        break
-      }
-    }
-  }
-
-  const baseVarName = sourceCode && varName?.endsWith(`_${sourceCode}`)
-    ? varName.slice(0, -sourceCode.length - 1)
-    : (varName ?? '')
-  return { componentType: sourceType, baseVarName }
+  const meta = parseResultSeriesKey(key)
+  return { componentType: meta.label, baseVarName: meta.base }
 }
 
 /**
- * 获取变量的中文显示名
- * @param componentType 组件类型代码 (如 "ES")
- * @param baseVarName 基础变量名 (如 "E_ES_out")
- * @returns 中文显示名，未找到时返回原始 baseVarName
+ * @deprecated 请使用 parseResultSeries(...).variableName 或 BASE_VAR_DISPLAY_NAMES
  */
 export function getVariableDisplayName(componentType: string, baseVarName: string): string {
-  // console.log(componentType, baseVarName, VARIABLE_DISPLAY_NAMES[componentType])
-  const typeMap = VARIABLE_DISPLAY_NAMES[componentType]
-  if (!typeMap) return baseVarName
-  return typeMap[baseVarName] ?? baseVarName
+  return BASE_VAR_DISPLAY_NAMES[baseVarName] ?? baseVarName
 }
+
+export type { ResultSeriesMeta }
 
 // ============================================================
 // 解析器：从 JSON + UI config 生成 ComponentDefinition

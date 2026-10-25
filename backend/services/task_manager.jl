@@ -1,6 +1,5 @@
 # 计算任务生命周期管理
-# 负责：CRUD、协程调度、Channel 信号、WS 订阅广播
-# 文档：docs/compute-task-architecture.md
+# 负责：任务元数据、进程上下文、取消控制和 WS 订阅广播
 
 using Dates
 
@@ -96,13 +95,16 @@ end
 # 每个 task_id 对应一个 TaskContext：协程 handle + signal Channel + WS 订阅者列表
 mutable struct TaskContext
     id::String
-    signal_ch::Channel{String}         # "pause" | "resume" | "cancel"
+    signal_ch::Channel{String}         # "cancel"
     subscribers::Vector{Channel{Dict{String, Any}}}  # WS 订阅者
     julia_task::Union{Task, Nothing}     # 协程 handle
     store_path::String                  # 任务 DB 路径 data/tasks/<id>/timeseries.db
     mode::String                        # "online" | "offline"
     sim_end_time::Union{String, Nothing}
     created_at::Float64
+    process::Union{Base.Process,Nothing}
+    cancel_requested::Bool
+    launching::Bool
 end
 
 # 全局 task context 字典
@@ -122,6 +124,12 @@ const TASK_EVENT_BUFFER = 32
 避免求解主循环被慢订阅者阻塞。
 """
 function broadcast_event(ctx::TaskContext, event::Dict)
+    # 子进程只有一个事件写入者；父进程转发给原有 WS 订阅者。
+    if get(ENV, "SYNERROLL_SIMULATION_WORKER", "") == "1"
+        open(joinpath(dirname(ctx.store_path), "events.jsonl"), "a") do io
+            write(io, JSON3.write(event), '\n')
+        end
+    end
     # 同时保护容量检查与发布，多个发布者不能在检查后把队列填满。
     lock(SUBSCRIBERS_LOCK) do
         for ch in ctx.subscribers
@@ -192,7 +200,7 @@ function get_or_create_context(task_id::String, mode::String,
             store_path,
             mode,
             sim_end_time,
-            time()
+            time(), nothing, false, false
         )
         TASK_CONTEXTS[task_id] = ctx
         return ctx
@@ -389,12 +397,13 @@ end
 """
     reconcile_running_tasks!()
 
-服务启动时调用：把 status=solving 的任务改为 cancelled（进程死了，不能继续）。
+服务启动时调用：将所有未终结任务标为中断取消，防止遗留状态一直显示运行中。
 """
 function reconcile_running_tasks!()
     store = get_task_store()
     DBInterface.execute(store.db,
-        "UPDATE tasks SET status=?, updated_at=? WHERE status=?",
-        [TASK_CANCELLED, now_iso(), TASK_SOLVING])
+        "UPDATE tasks SET status=?, updated_at=?, finished_at=?, error_message=? WHERE status IN (?,?,?,?)",
+        [TASK_CANCELLED, now_iso(), now_iso(), "软件退出或后端重启，任务已中断。",
+         TASK_PENDING, TASK_PARSING, TASK_BUILDING, TASK_SOLVING])
     return nothing
 end

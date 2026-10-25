@@ -1,4 +1,4 @@
-import { apiSuccess } from '#server/utils/response'
+import { apiSuccess, rethrowAsApiError, throwBackendBizError } from '#server/utils/response'
 import { JULIA } from '#server/utils/julia'
 
 const JULIA_BACKEND_URL_BASE = JULIA.task()
@@ -22,18 +22,9 @@ export default defineEventHandler(async (event) => {
     if (response.success) {
       return apiSuccess({}, response.message)
     }
-    else {
-      throw createError({
-        statusCode: 400,
-        message: response.message || '清理失败'
-      })
-    }
+    throwBackendBizError(response.message, '清理失败')
   }
   catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
-    throw createError({
-      statusCode: 500,
-      message: `Julia backend error: ${message}`
-    })
+    rethrowAsApiError(error, '清理失败')
   }
 })

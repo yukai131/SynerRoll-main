@@ -21,6 +21,8 @@ export interface Project {
   layerConfig: LayerConfigSet
   // 边界配置
   boundaries: BoundaryItem[]
+  /** 边界配置/时序最近一次变更时间（容量规划过期检测用） */
+  boundariesUpdatedAt?: string
   // 设备参数拟合机型（项目级，可被多个组件引用）
   fittingModels?: FittingModel[]
   // 算法配置

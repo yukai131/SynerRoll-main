@@ -376,8 +376,8 @@ export const createDefaultPageConfig = (): PageConfig => ({
   gridSize: 15,
   gridColor: '#E5E7EB',
   snapToGrid: true,
-  showComponentName: true,
-  showParameterTag: false,
+  showComponentName: false,
+  showParameterTag: true,
   showPorts: true,
   labelLanguage: 'chinese'
 })

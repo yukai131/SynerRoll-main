@@ -3827,7 +3827,10 @@
           "unit": "kW",
           "step": 10000,
           "min": 0,
-          "required": true
+          "required": true,
+          "planning": {
+            "optimizable": false
+          }
         },
         {
           "key": "sell_ratio",
@@ -3948,9 +3951,7 @@
           "min": 0.0,
           "required": true,
           "planning": {
-            "optimizable": true,
-            "defaultLowerFactor": 0.5,
-            "defaultUpperFactor": 2.0
+            "optimizable": false
           }
         },
         {
@@ -4062,7 +4063,12 @@
           "unit": "kW",
           "step": 1000.0,
           "min": 0.0,
-          "required": true
+          "required": true,
+          "planning": {
+            "optimizable": true,
+            "defaultLowerFactor": 0.5,
+            "defaultUpperFactor": 2.0
+          }
         },
         {
           "key": "ramp",

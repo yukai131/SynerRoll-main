@@ -1,22 +1,13 @@
 {
-  "$schema": "./synerroll.schema.json",
   "version": 1,
-  "juliaPort": 8080,
-  "bffPort": 3000,
-  "host": "127.0.0.1",
-  "solver": "HiGHS",
-  "dataDir": "data",
-  "logDir": "logs",
   "julia": {
-    "heapSizeHintMB": 0,
-    "startupTimeoutSec": 120
+    "startupTimeoutSec": 900
   },
   "bff": {
-    "startupTimeoutSec": 60
+    "startupTimeoutSec": 90
   },
   "ui": {
-    "openDevTools": false,
-    "windowWidth": 1440,
-    "windowHeight": 900
+    "windowWidth": 1200,
+    "windowHeight": 800
   }
 }

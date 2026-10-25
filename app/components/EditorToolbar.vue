@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ToolbarGroupConfig } from '~~/config/system-config'
+import type { ToolbarButtonStatus, ToolbarGroupConfig } from '~~/config/system-config'
 
 import { toolbarIconMap } from '../assets/icons/toolbar'
 
@@ -17,6 +17,7 @@ interface ToolbarActionPayload {
 const props = defineProps<{
   groups: ToolbarGroupConfig[]
   values: Record<string, string | number | boolean | undefined>
+  statuses?: Record<string, ToolbarButtonStatus | undefined>
 }>()
 
 const emit = defineEmits<{
@@ -32,6 +33,26 @@ let activeSelectTrigger: HTMLElement | null = null
 
 const getValue = (actionKey: string): string | number | boolean | undefined => props.values[actionKey]
 const getIcon = (iconName: string | undefined) => iconName ? toolbarIconMap[iconName] : undefined
+const getStatus = (actionKey: string): ToolbarButtonStatus | undefined => props.statuses?.[actionKey]
+const statusCount = (actionKey: string) => {
+  const s = getStatus(actionKey)
+  return s?.kind === 'count' ? s.value : 0
+}
+const statusText = (actionKey: string) => {
+  const s = getStatus(actionKey)
+  return s?.kind === 'text' ? s.value : ''
+}
+const statusDotTone = (actionKey: string) => {
+  const s = getStatus(actionKey)
+  return s?.kind === 'dot' ? s.tone : ''
+}
+const statusDotBlink = (actionKey: string) => {
+  const s = getStatus(actionKey)
+  return s?.kind === 'dot' ? Boolean(s.blink) : false
+}
+const hasStatusCount = (actionKey: string) => getStatus(actionKey)?.kind === 'count' && statusCount(actionKey) > 0
+const hasStatusText = (actionKey: string) => getStatus(actionKey)?.kind === 'text'
+const hasStatusDot = (actionKey: string) => getStatus(actionKey)?.kind === 'dot'
 const isToggleActive = (actionKey: string) => Boolean(getValue(actionKey))
 const isSelectOpen = (actionKey: string) => openSelectKey.value === actionKey
 
@@ -157,9 +178,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="toolbarRef" class="editor-card relative h-[60px] overflow-visible p-1">
+  <!-- 高度略加高：给按钮右上角状态角标留出顶部空间，图标按钮保持原先垂直位置 -->
+  <div ref="toolbarRef" class="editor-card relative h-[72px] overflow-visible p-1">
     <div class="overflow-x-auto overflow-y-hidden h-full">
-      <div class="mx-auto flex min-w-max items-center justify-center gap-4">
+      <div class="mx-auto flex min-w-max items-start justify-center gap-4 pt-1">
         <div
           v-for="group in groups"
           :key="group.key"
@@ -169,11 +191,34 @@ onBeforeUnmount(() => {
             <button
               v-if="action.type === 'button'"
               type="button"
-              class="inline-flex min-w-[48px] cursor-pointer flex-col items-center gap-1 rounded-[10px] px-1.5 py-1.5 text-[12px] text-app-text transition hover:bg-app-panel-soft hover:text-primary"
+              class="relative inline-flex min-w-[48px] cursor-pointer flex-col items-center gap-1 rounded-[10px] px-1.5 py-1.5 text-[12px] text-app-text transition hover:bg-app-panel-soft hover:text-primary"
               @click="emit('action', { key: action.key })"
             >
               <component :is="getIcon(action.icon)" v-if="getIcon(action.icon)" />
               <span class="leading-none whitespace-nowrap">{{ action.label }}</span>
+              <span
+                v-if="hasStatusCount(action.key)"
+                class="absolute right-0 top-0 min-w-[16px] rounded-full bg-primary px-1 text-[10px] font-medium leading-4 text-white shadow-sm"
+              >
+                {{ statusCount(action.key) }}
+              </span>
+              <span
+                v-else-if="hasStatusText(action.key)"
+                class="absolute right-0 top-0 rounded-full bg-app-panel-soft px-1 text-[10px] leading-4 text-app-muted ring-1 ring-app-border"
+              >
+                {{ statusText(action.key) }}
+              </span>
+              <span
+                v-else-if="hasStatusDot(action.key)"
+                class="absolute right-0.5 top-0.5 h-2 w-2 rounded-full"
+                :class="{
+                  'bg-emerald-500': statusDotTone(action.key) === 'green',
+                  'bg-zinc-400': statusDotTone(action.key) === 'gray',
+                  'bg-red-500': statusDotTone(action.key) === 'red',
+                  'bg-blue-500 animate-pulse': statusDotTone(action.key) === 'blue' && statusDotBlink(action.key),
+                  'bg-blue-500': statusDotTone(action.key) === 'blue' && !statusDotBlink(action.key)
+                }"
+              />
             </button>
 
             <button

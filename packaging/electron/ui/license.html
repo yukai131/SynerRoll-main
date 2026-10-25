@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'none'">
+  <title>许可证验证</title>
+  <style>
+    /* 基础样式 */
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      background-color: #f5f7fa;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+
+    /* 软件图标 */
+    .app-icon {
+      width: 60px;
+      height: 60px;
+      margin-bottom: 15px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      object-fit: cover;
+    }
+
+    /* 软件标题 */
+    .app-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 25px;
+      color: #0a4da2;
+      /* 使用你主色 */
+    }
+
+    /* 输入框容器 */
+    .input-container {
+      width: 80%;
+      max-width: 400px;
+    }
+
+    /* 输入框样式 */
+    input {
+      width: 100%;
+      padding: 12px 15px;
+      margin-top: 10px;
+      margin-bottom: 20px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 14px;
+      box-sizing: border-box;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #0079c2;
+      /* 使用你辅色 */
+      box-shadow: 0 0 0 3px rgba(0, 121, 194, 0.2);
+    }
+
+    /* 按钮容器 */
+    .button-container {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+
+    /* 按钮样式 */
+    button {
+      padding: 10px 22px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    /* 确认按钮 */
+    .btn-confirm {
+      background-color: #0079c2;
+      color: white;
+    }
+
+    .btn-confirm:hover {
+      background-color: #0a4da2;
+      transform: translateY(-2px);
+      box-shadow: 0 4px 10px rgba(10, 77, 162, 0.3);
+    }
+
+    /* 取消按钮 */
+    .btn-cancel {
+      background-color: #f0f2f5;
+      color: #555;
+    }
+
+    .btn-cancel:hover {
+      background-color: #e5e7eb;
+      transform: translateY(-2px);
+    }
+
+    /* 提示文字 */
+    .prompt-text {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+  .app-title { max-width: 94%; text-align: center; line-height: 1.5; margin-bottom: 8px; font-size: 20px; }
+.publisher { font-size: 12px; color: #666; margin-bottom: 24px; }
+.error { color: #b42318; font-size: 13px; min-height: 20px; margin: 14px 20px 0; text-align: center; }
+.version { color: #8a94a5; font-size: 12px; margin-top: 4px; }
+button:disabled { opacity: .6; cursor: wait; }
+  </style>
+</head>
+
+<body>
+
+  <!-- 软件图标 -->
+  <img src="logo.png" alt="软件图标" class="app-icon">
+
+  <!-- 软件标题 -->
+  <div class="app-title" id="appTitle">新能源发电系统灵活性量化评估软件</div>
+
+  <!-- 提示文字 -->
+  <div class="publisher" id="publisher"></div>
+  <div class="prompt-text">请输入有效的许可证密钥：</div>
+
+  <!-- 输入框 -->
+  <div class="input-container">
+    <input type="password" id="licenseKey" autofocus placeholder="请输入许可证密钥" autocomplete="off" spellcheck="false">
+  </div>
+
+  <!-- 按钮 -->
+  <div class="button-container">
+    <button class="btn-confirm" id="confirmButton" type="submit">确认</button>
+    <button class="btn-cancel" id="cancelButton" type="button">取消</button>
+  </div>
+
+  <p id="licenseError" class="error" role="alert" aria-live="polite"></p>
+  <small id="version" class="version"></small>
+  <script src="license.js"></script>
+</body>
+
+</html>

@@ -1,3 +1,5 @@
+import { timeLabelToMinutes } from './timeLabel.ts'
+
 const minutesCache = new WeakMap<object, number>()
 
 /** 点对象在收到修正值时会替换，缓存不会把旧时间戳带到新点上。 */
@@ -24,4 +26,19 @@ export function lowerBound<T>(rows: readonly T[], minute: number, getMinute: (ro
 
 export function sliceTimeSeries<T extends { ts: string }>(rows: readonly T[], start: number, end: number): T[] {
   return rows.slice(lowerBound(rows, start, pointMinutes), lowerBound(rows, end, pointMinutes))
+}
+
+/** 将平行时间戳/数值数组截取为 [start, end) 内的 ECharts 点。 */
+export function pairTimeSeriesWindow(
+  timestamps: readonly string[],
+  values: readonly number[],
+  start: number,
+  end: number
+): Array<[number, number]> {
+  const points: Array<[number, number]> = []
+  for (let i = 0; i < timestamps.length; i++) {
+    const minute = timeLabelToMinutes(timestamps[i]!)
+    if (minute >= start && minute < end) points.push([minute, Number(values[i])])
+  }
+  return points
 }

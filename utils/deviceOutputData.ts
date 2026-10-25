@@ -1,6 +1,6 @@
 import type { FlowNode } from '~~/types/canvas'
 import type { Project } from '~~/types/project'
-import { VARIABLE_DISPLAY_NAMES, componentDefinitionMap } from '~~/config/component-meta'
+import { BASE_VAR_DISPLAY_NAMES, componentDefinitionMap } from '~~/config/component-meta'
 import { getResultDisplayUnit } from '~~/utils/result-units'
 
 export interface DeviceOutputPoint {
@@ -47,23 +47,6 @@ export interface UnitOption {
   label: string
   value: string
   factor: number
-}
-
-const EXTRA_VARIABLE_NAMES: Record<string, string> = {
-  E_GRID_in: '购电功率',
-  E_GRID_out: '上网功率',
-  H_HGRID_in: '售氢流量',
-  H_HGRID_out: '购氢流量',
-  E_HYDRO: '输出功率',
-  AVAILABLE_HYDRO: '可用功率',
-  MINIMUM_HYDRO: '最小运行功率',
-  Q_EXCESS: '过剩热功率',
-  Q_SHORTAGE: '缺额热功率',
-  E_EXCESS: '过剩功率',
-  E_SHORTAGE: '缺额功率',
-  E_ELOAD: '电负荷',
-  Q_QLOAD: '热负荷',
-  H_HLOAD: '氢负荷'
 }
 
 const MEDIUM_LABELS: Record<DeviceOutputMedium, string> = {
@@ -133,9 +116,7 @@ function baseVariableName(varName: string, code: string): string {
 }
 
 function variableDisplayName(componentType: string, baseVarName: string): string {
-  return VARIABLE_DISPLAY_NAMES[componentType]?.[baseVarName]
-    ?? EXTRA_VARIABLE_NAMES[baseVarName]
-    ?? baseVarName
+  return BASE_VAR_DISPLAY_NAMES[baseVarName] ?? baseVarName
 }
 
 function inferMedium(componentType: string, baseVarName: string): DeviceOutputMedium {

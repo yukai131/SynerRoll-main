@@ -318,24 +318,25 @@ function load_slack_data(store_path::String, layer_id::String, shortage_penalty_
             end
 
             if occursin("SHORTAGE", var_name_str)
-                val = sum(values) * shortage_penalty_rate
-                if val > 0.0
+                raw = sum(values)
+                # 滤除求解器浮点噪声，避免 hasSlack 误报能量不平衡
+                if raw > 0.0 && is_meaningful_slack(raw)
                     bus_code = replace(var_name_str, "E_SHORTAGE_" => "", "H_SHORTAGE_" => "", "Q_SHORTAGE_" => "")
                     push!(items, CostItem(
                         "BUS_$(bus_code)", "BUS", "总线($(bus_code))",
                         "shortage_penalty", cost_label("shortage_penalty"),
-                        layer_id, val, false, true, false;
+                        layer_id, raw * shortage_penalty_rate, false, true, false;
                         formula=cost_formula("shortage_penalty"), objective_flag="",
                     ))
                 end
             elseif occursin("EXCESS", var_name_str)
-                val = sum(values) * excess_penalty_rate
-                if val > 0.0
+                raw = sum(values)
+                if raw > 0.0 && is_meaningful_slack(raw)
                     bus_code = replace(var_name_str, "E_EXCESS_" => "", "H_EXCESS_" => "", "Q_EXCESS_" => "")
                     push!(items, CostItem(
                         "BUS_$(bus_code)", "BUS", "总线($(bus_code))",
                         "excess_penalty", cost_label("excess_penalty"),
-                        layer_id, val, false, true, false;
+                        layer_id, raw * excess_penalty_rate, false, true, false;
                         formula=cost_formula("excess_penalty"), objective_flag="",
                     ))
                 end

@@ -71,7 +71,7 @@
   }
 
   .panel-title {
-    @apply text-sm font-semibold text-app-text;
+    @apply text-base text-app-text;
   }
 
   .field-label {

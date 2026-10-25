@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # hydro_power/model.jl — 元编程追踪版本
 #
-# 数学含义见 model-base.jl；本文件保持与既有组件一致的 CodeTracer 写法。
+# 使用与其他组件一致的 CodeTracer 写法。
 # ═══════════════════════════════════════════════════════════════════════════
 
 function build_component_model!(model, component::HydroPower, ctx::BuildContext, tracer::CodeTracer)

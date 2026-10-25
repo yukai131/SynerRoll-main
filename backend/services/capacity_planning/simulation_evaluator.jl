@@ -175,7 +175,7 @@ function evaluate_snapshot(
                     write(joinpath(scenario_dir, "model.jl"), generated_code)
                 end
                 cancel_check() && throw(PlanningCancelled("规划任务已取消"))
-                JuMP.set_time_limit_sec(model, options.scenario_time_limit_seconds)
+                JuMP.set_time_limit_sec(model, min(options.scenario_time_limit_seconds, planning_remaining_seconds()))
                 report("solving")
                 solve_result = perf_measure_db(db_path, "solve_and_persist"; meta=scenario_meta) do
                     solve_model(
@@ -211,7 +211,7 @@ function evaluate_snapshot(
                     "optimal" => solver_status == "OPTIMAL",
                 ))
             catch error
-                error isa PlanningCancelled && rethrow()
+                (error isa PlanningCancelled || error isa PlanningTimeLimit) && rethrow()
                 bt = catch_backtrace()
                 @warn "容量规划场景评价失败" scenario_id weight_days exception=(error, bt)
                 push!(scenario_metrics, Dict{String,Any}(
@@ -244,7 +244,7 @@ function evaluate_snapshot(
             scenario_metrics=scenario_metrics,
         )
     catch error
-        error isa PlanningCancelled && rethrow()
+        (error isa PlanningCancelled || error isa PlanningTimeLimit) && rethrow()
         return _evaluation_failure(error; scenario_metrics)
     end
 end

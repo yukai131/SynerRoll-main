@@ -3,7 +3,7 @@
 # 职责：
 #   - 提供纯数值成本公式（不依赖 JuMP、不依赖数据库）
 #   - 被评价服务层调用（后验计算）
-#   - 公式与 model-base.jl 中的目标项保持同一口径
+#   - 公式与组件 model.jl 中的目标项保持同一口径
 #
 # 单位约定（与 config/component-library.json 一致）：
 #   - om_cost / cut_cost / adjust_cost / buy_price / sell_price：元/kWh（在参数解析时 × time_step_hours）
@@ -439,9 +439,19 @@ end
 # ─── 松弛变量成本 ────────────────────────────────────────────────────────────
 
 """
+求解器输出的松弛量可能带 1e-17 量级浮点噪声；小于该阈值视为 0，
+避免误报「能量不平衡」。与 economic_evaluator._slack_unstable_slots 同口径。
+"""
+const SLACK_VALUE_EPS = 1.0e-6
+
+"""松弛量/惩罚是否达到需要入账的幅度（滤除浮点噪声）。"""
+is_meaningful_slack(value::Real)::Bool = abs(Float64(value)) > SLACK_VALUE_EPS
+
+"""
     calc_slack_penalty(...)
 
 松弛惩罚单独列出，不进入目标函数展示（目标值已扣除松弛）。
+噪声级松弛（≤ SLACK_VALUE_EPS）不生成成本项。
 """
 function calc_slack_penalty(
     bus_id::String, bus_name::String,
@@ -450,20 +460,20 @@ function calc_slack_penalty(
 )
     items = CostItem[]
 
-    shortage_val = sum(shortage) * shortage_penalty_rate
-    if shortage_val > 0.0
+    shortage_sum = sum(shortage)
+    if shortage_sum > 0.0 && is_meaningful_slack(shortage_sum)
         push!(items, CostItem(
             bus_id, "BUS", bus_name, "shortage_penalty", cost_label("shortage_penalty"),
-            layer_id, shortage_val, false, true, false;
+            layer_id, shortage_sum * shortage_penalty_rate, false, true, false;
             formula=cost_formula("shortage_penalty"), objective_flag="",
         ))
     end
 
-    excess_val = sum(excess) * excess_penalty_rate
-    if excess_val > 0.0
+    excess_sum = sum(excess)
+    if excess_sum > 0.0 && is_meaningful_slack(excess_sum)
         push!(items, CostItem(
             bus_id, "BUS", bus_name, "excess_penalty", cost_label("excess_penalty"),
-            layer_id, excess_val, false, true, false;
+            layer_id, excess_sum * excess_penalty_rate, false, true, false;
             formula=cost_formula("excess_penalty"), objective_flag="",
         ))
     end

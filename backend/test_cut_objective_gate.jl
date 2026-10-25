@@ -1,11 +1,8 @@
 # cut_objective_on must gate planning fitness (sync with JuMP objective)
 using Test
 ENV["SYNERROLL_DATA_DIR"] = mktempdir(; cleanup=false)
-const server_path = joinpath(@__DIR__, "server.jl")
-const server_source = read(server_path, String)
-const load_end = findfirst("# 全局常量", server_source)
-load_source = replace(server_source[1:first(load_end)-1], "using COPT"=>"", "using SCIP"=>"")
-include_string(Main, load_source, server_path)
+ENV["SYNERROLL_CAPACITY_WORKER"] = "1"
+include(joinpath(@__DIR__, "server.jl"))
 
 function _fixture_project(; cut_objective_on::Bool)
     library = JSON3.read(read(joinpath(@__DIR__, "../config/component-library.json"), String), Dict{String,Any})["components"]

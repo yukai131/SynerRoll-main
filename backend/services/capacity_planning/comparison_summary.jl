@@ -14,6 +14,11 @@ const COMPARISON_METRICS = (
     ("lcoe",                   "LCOE(元/kWh)",    "asc",  "breakdown.indicators.lcoe（C-403 全投资折现口径，分母=上网电量）"),
     ("paybackYears",           "回收期(年)",      "asc",  "breakdown.lifecyclePaybackYears（税后简单回收期）"),
     ("discountedPaybackYears", "折现回收期(年)",  "asc",  "breakdown.lifecycleDiscountedPaybackYears"),
+    # C-404 技术约束软惩罚四项：便于迭代过程回溯对比（越高越好 / 购电越低越好）
+    ("renewableConsumptionRate", "新能源消纳率(%)", "desc", "breakdown.technicalMetrics.renewableConsumptionRate"),
+    ("greenPowerShare",          "绿电占比(%)",     "desc", "breakdown.technicalMetrics.greenPowerShare"),
+    ("purchasedPowerShare",      "购电占比(%)",     "asc",  "breakdown.technicalMetrics.purchasedPowerShare"),
+    ("stability",                "稳定性(%)",       "desc", "breakdown.technicalMetrics.stability"),
 )
 
 function _comparison_number(value)
@@ -47,6 +52,10 @@ function _comparison_metric_value(breakdown::AbstractDict, key::String)
         return _comparison_number(get(breakdown, "lifecyclePaybackYears", nothing))
     elseif key == "discountedPaybackYears"
         return _comparison_number(get(breakdown, "lifecycleDiscountedPaybackYears", nothing))
+    elseif key in ("renewableConsumptionRate", "greenPowerShare", "purchasedPowerShare", "stability")
+        tech = get(breakdown, "technicalMetrics", nothing)
+        tech isa AbstractDict || return nothing
+        return _comparison_number(get(tech, key, nothing))
     else
         return _comparison_number(get(breakdown, key, nothing))
     end
@@ -142,15 +151,18 @@ function build_planning_comparison(planning_id::String)
             number === nothing && continue
             contributions[string(key)[length("scenarioCost:") + 1:end]] = number
         end
-        total_cost = _comparison_number(get(breakdown, "weightedOperatingCost", nothing))
+        # 运行成本可能因售电收益大于购能/运维支出而为负。此时仍然有完整的
+        # 场景成本数据，不能因为年度净成本 <= 0 就把占比全部置空。
+        # “贡献占比”按各场景加权净成本的绝对值归一化；带符号的原始金额仍由
+        # weightedCostYuan 下发，前端可同时表达该场景是成本还是净收益。
+        contribution_scale = sum(abs(cost) for (_, cost) in contributions)
         scenario_contributions = [
             Dict{String,Any}(
                 "scenarioId" => scenario_id,
                 "weightedCostYuan" => cost,
-                "share" => (total_cost === nothing || total_cost <= 0) ? nothing :
-                           min(1.0, max(0.0, cost / total_cost)),
+                "share" => contribution_scale <= 0 ? nothing : abs(cost) / contribution_scale,
             )
-            for (scenario_id, cost) in sort(collect(contributions); by = pair -> -pair[2])
+            for (scenario_id, cost) in sort(collect(contributions); by = pair -> -abs(pair[2]))
         ]
 
         diff = Dict{String,Float64}()

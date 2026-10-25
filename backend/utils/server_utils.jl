@@ -7,6 +7,29 @@ using HTTP
 # 所有 project / task / boundary DB 都建在这里
 const BACKEND_DATA_DIR = abspath(get(ENV, "SYNERROLL_DATA_DIR", joinpath(@__DIR__, "..", "data")))
 
+"""
+    remove_tree_with_retry(path; attempts=4)
+
+递归删除目录。Windows 上 SQLite/杀毒软件可能在句柄关闭后短暂保留文件锁，
+因此在最终失败前触发 GC 并进行少量退避重试。最终失败仍向上抛出，避免调用方
+误删任务索引、留下无法追踪的计算数据。
+"""
+function remove_tree_with_retry(path::String; attempts::Int=4)
+    isdir(path) || return nothing
+    attempts >= 1 || error("attempts 必须大于 0")
+    for attempt in 1:attempts
+        try
+            rm(path; recursive=true, force=true)
+            return nothing
+        catch
+            attempt == attempts && rethrow()
+            GC.gc(true)
+            sleep(0.1 * attempt)
+        end
+    end
+    return nothing
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 请求参数解析
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19,20 +42,22 @@ request_query_params(req) = HTTP.queryparams(HTTP.URI(String(req.target)))
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    json_success(; kwargs...) -> String
+    json_success(; kwargs...) -> HTTP.Response
 
 成功响应 JSON：顶层带 `success=true`，把 kwargs 平铺到顶层。
 例：`json_success(data=Dict("x"=>1), message="ok")`
      => `{"success":true,"data":{"x":1},"message":"ok"}`
 """
-json_success(; kwargs...) = JSON3.write(Dict(:success => true, kwargs...))
+json_success(; kwargs...) = HTTP.Response(200,
+    ["Content-Type" => "application/json; charset=utf-8"], JSON3.write(Dict(:success => true, kwargs...)))
 
 """
-    json_error(message::AbstractString) -> String
+    json_error(message::AbstractString) -> HTTP.Response
 
 错误响应 JSON：顶层带 `success=false` 和 `message`。
 """
-json_error(message::AbstractString) = JSON3.write(Dict("success" => false, "message" => message))
+json_error(message::AbstractString) = HTTP.Response(200,
+    ["Content-Type" => "application/json; charset=utf-8"], JSON3.write(Dict("success" => false, "message" => message)))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 请求参数辅助

@@ -1,11 +1,11 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { CapacityApplyRecord } from '~~/types/capacity-planning'
 
 // C-406 安全应用：应用记录（含撤销/恢复所需的画布前后快照与来源溯源）。
 // 独立 JSON 存储（server/data/capacity-applies.json），与项目库同风格串行化写。
-const dataDirectory = join(process.cwd(), 'server', 'data')
+const dataDirectory = process.env.SYNERROLL_DATA_DIR || join(process.cwd(), 'server', 'data')
 const dataFile = join(dataDirectory, 'capacity-applies.json')
 
 let applyStoreQueue: Promise<void> = Promise.resolve()
@@ -18,7 +18,9 @@ const withApplyLock = async <T>(operation: () => Promise<T>): Promise<T> => {
 
 const writeAppliesUnlocked = async (records: CapacityApplyRecord[]): Promise<void> => {
   await mkdir(dataDirectory, { recursive: true })
-  await writeFile(dataFile, JSON.stringify(records, null, 2), 'utf8')
+  const temporaryFile = `${dataFile}.tmp`
+  await writeFile(temporaryFile, JSON.stringify(records, null, 2), 'utf8')
+  await rename(temporaryFile, dataFile)
 }
 
 const ensureAppliesUnlocked = async (): Promise<CapacityApplyRecord[]> => {

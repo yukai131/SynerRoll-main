@@ -414,6 +414,19 @@ function _evaluate_flexibility_after_solve!(
     end
 end
 
+function _finish_flexibility_evaluation!(ctx, task_id, store_path, config, margins)
+    config === nothing && return nothing
+    isempty(margins) && error("灵活性评价未产生时段结果，评价层：$(config.layer_id)。")
+    summaries = summarize_system_flexibility_margin(margins)
+    persist_system_flexibility_summary_results!(store_path, config.layer_id, summaries)
+    broadcast_event(ctx, Dict(
+        "type" => "flexibility_summary", "taskId" => task_id,
+        "layerId" => config.layer_id,
+        "rows" => system_flexibility_margin_summary_result_dict.(summaries),
+    ))
+    return nothing
+end
+
 # ════════════════════════════════════════════════════════════════
 # 单层仿真主函数
 # ════════════════════════════════════════════════════════════════
@@ -463,7 +476,10 @@ function run_single_layer_task(task_id::String, task::Dict)
         build_result === nothing && return nothing
         all_layers, nodes = build_result
         flexibility_config = flexibility_evaluation_config_from_task(task)
-
+        if flexibility_config !== nothing && flexibility_config.layer_id != target_layer_id
+            error("单层仿真的灵活性评价层必须与仿真目标层 $(target_layer_id) 一致。")
+        end
+        flexibility_margins = SystemFlexibilityMarginResult[]
 
         # 验证目标层是否存在
         if !haskey(all_layers, target_layer_id)
@@ -548,7 +564,11 @@ function run_single_layer_task(task_id::String, task::Dict)
             # ★ [数学业务] 求解目标层
             solve_out = _solve_layer!(ctx, task_id, component_dicts, algorithms, nodes, target_layer, sim_time, store_path, code_dir, solved_steps; all_layers=all_layers)
             solve_out === nothing && return nothing
-            solved_steps, _ = solve_out
+            solved_steps, solved_comps = solve_out
+            append!(flexibility_margins, _evaluate_flexibility_after_solve!(
+                ctx, task_id, solved_comps, target_layer, sim_time, sim_end,
+                store_path, flexibility_config,
+            ))
 
             perf_measure("task", task_id, "throttle_wait") do
                 sleep(0.1) # 必须存在，否则求解速度超过数据库读写速度，会导致前端渲染阻塞
@@ -566,6 +586,7 @@ function run_single_layer_task(task_id::String, task::Dict)
         # ════════════════════════════════════════════
         # 阶段 5 — 完成
         # ════════════════════════════════════════════
+        _finish_flexibility_evaluation!(ctx, task_id, store_path, flexibility_config, flexibility_margins)
         update_task_status!(task_id, TASK_COMPLETED)
         broadcast_event(ctx, Dict("type" => "completed", "taskId" => task_id, "finalTime" => sim_time, "solvedSteps" => solved_steps))
         remove_context(task_id)
@@ -787,24 +808,7 @@ function run_task(task_id::String, task::Dict)
         # ════════════════════════════════════════════
         # 阶段 5 — 完成
         # ════════════════════════════════════════════
-        if flexibility_config !== nothing
-            isempty(flexibility_margins) && error(
-                "Flexibility evaluation produced no periods for " *
-                "layer $(flexibility_config.layer_id).",
-            )
-            summaries = summarize_system_flexibility_margin(flexibility_margins)
-            persist_system_flexibility_summary_results!(
-                store_path,
-                flexibility_config.layer_id,
-                summaries,
-            )
-            broadcast_event(ctx, Dict(
-                "type" => "flexibility_summary",
-                "taskId" => task_id,
-                "layerId" => flexibility_config.layer_id,
-                "rows" => system_flexibility_margin_summary_result_dict.(summaries),
-            ))
-        end
+        _finish_flexibility_evaluation!(ctx, task_id, store_path, flexibility_config, flexibility_margins)
         update_task_status!(task_id, TASK_COMPLETED)
         broadcast_event(ctx, Dict("type" => "completed", "taskId" => task_id, "finalTime" => sim_time, "solvedSteps" => solved_steps))
         remove_context(task_id)
@@ -824,8 +828,8 @@ function run_task(task_id::String, task::Dict)
     end
 end
 
-# ■ 接口逻辑：spawn_task（调度入口，不要动）
-function spawn_task(task_id::String, task::Dict)
+# 工作进程内调用；HTTP 进程通过 simulation_process.jl 调度。
+function execute_simulation_task(task_id::String, task::Dict)
     ctx = get_or_create_context(
         task_id,
         task["mode"],
@@ -835,7 +839,7 @@ function spawn_task(task_id::String, task::Dict)
     # 根据 simMode 分发到不同的求解函数
     sim_mode = get(task, "sim_mode", "multi_layer")
     solve_func = sim_mode == "single_layer" ? run_single_layer_task : run_task
-    jl_task = @async try
+    try
         perf_start("task", task_id; meta=Dict{String,Any}(
             "mode" => task["mode"], "sim_mode" => sim_mode,
             "sim_start_time" => get(task, "sim_start_time", nothing),
@@ -851,8 +855,5 @@ function spawn_task(task_id::String, task::Dict)
     finally
         perf_finish("task", task_id)
     end
-    lock(TASK_CONTEXTS_LOCK) do
-        TASK_CONTEXTS[task_id].julia_task = jl_task
-    end
-    return jl_task
+    return nothing
 end

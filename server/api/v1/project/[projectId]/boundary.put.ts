@@ -24,6 +24,7 @@ export default defineEventHandler(async (event) => {
   const project = await updateProject(projectId, current => ({
     ...current,
     boundaries: lightBoundaries,
+    boundariesUpdatedAt: new Date().toISOString(),
     ...(body.fittingModels ? { fittingModels: body.fittingModels } : {})
   }))
 

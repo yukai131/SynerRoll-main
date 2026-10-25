@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # hydro_power/model-common.jl — 共享函数
 #
-# model-base.jl 和 model.jl 共用的参数解析与辅助函数
+# 参数解析与辅助函数。
 # ═══════════════════════════════════════════════════════════════════════════
 
 function resolve_hydro_power_params(component::HydroPower, ctx::BuildContext)

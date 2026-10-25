@@ -14,14 +14,14 @@ import type {
 // import { BOUNDARY_MEANING_LABELS, BOUNDARY_COMPONENT_MAPPINGS, INTERPOLATE_OPTIONS, DISTRIBUTION_OPTIONS, TIME_STEP_OPTIONS } from '~~/types/boundary'
 import {
   BOUNDARY_MEANING_LABELS,
-  BOUNDARY_MEANING_UNITS,
-  BOUNDARY_MEANING_UNIT_OPTIONS,
   BOUNDARY_MODULE_OPTIONS,
   BOUNDARY_MODULE_LABELS,
   INTERPOLATE_OPTIONS,
   DISTRIBUTION_OPTIONS,
   TIME_STEP_OPTIONS,
   boundaryAxisName,
+  deriveBoundaryUnit,
+  hasLoadUnitConflict,
   meaningMatchesBoundaryKey,
   meaningsForModule,
   resolveBoundaryModuleKey,
@@ -31,6 +31,7 @@ import type { FittingModel, FittingType } from '~~/types/fitting'
 import { FITTING_TYPE_LABELS, FITTING_TYPE_OPTIONS, createEmptyFittingModel } from '~~/types/fitting'
 import { componentDefinitionMap } from '~~/config/component-meta'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 import { useToastCenter } from '~~/state/ui'
 import {
   DEFAULT_BOUNDARY_START_DATE,
@@ -40,6 +41,7 @@ import {
 } from '~~/utils/calendarTime'
 import { timeLabelToMinutes } from '~~/utils/timeLabel'
 import { downsampleTimeSeries } from '~~/utils/chart-downsample'
+import { pairTimeSeriesWindow } from '~~/utils/time-series-window'
 import {
   getBoundaryRelatedComponentsForActiveCanvas,
   reconcileBoundaryBindings,
@@ -52,6 +54,11 @@ import {
   syncFittingModelsFromWorkspace,
   syncWorkspaceFromFittingModels
 } from '~~/utils/fitting-sync'
+import {
+  BOUNDARY_DATA_STATUS_LABELS,
+  resolveBoundaryDataStatus,
+  type BoundaryDataStatus
+} from '~~/utils/boundary-data-status'
 import PropertySelect from '../../components/PropertySelect.vue'
 import PropertyText from '../../components/PropertyText.vue'
 import PropertyMultiSelect from '../../components/PropertyMultiSelect.vue'
@@ -89,7 +96,14 @@ const projectApi = useProjectApi()
 const { push } = useToastCenter()
 
 const projectState = useState<Project | null>(`boundary-project-${projectId.value}`, () => null)
-const { data, pending } = await useAsyncData(`boundary-page-${projectId.value}`, () => projectApi.getProject(projectId.value))
+const { data, pending } = await useAsyncData(
+  `boundary-page-${projectId.value}`,
+  () => projectApi.getProject(projectId.value),
+  {
+    // 强制拉取最新，保证从画布带回的关联一定可见
+    getCachedData: () => undefined
+  }
+)
 
 // 活动标签 - 需要在 initBoundaries 之前定义
 const activeTab = ref<string>('')
@@ -120,6 +134,8 @@ let rawChartInstance: echarts.ECharts | null = null
 // 转换后图表（每层一个）
 const transformedChartRefs = ref<HTMLDivElement[]>([])
 const transformedChartInstances: Record<string, echarts.ECharts> = {}
+let rawChartRenderFrame = 0
+let transformedChartRenderFrame = 0
 
 // ============================================================
 // 视窗（日期 + 双端滑块）
@@ -157,10 +173,7 @@ const resetDisplayWindows = () => {
   displayWindow.value = { start: 0, end: endMinute }
 }
 
-const formatWindowLabel = (minute: number): string =>
-  formatCalendarMinute(form.calendarStartDate || DEFAULT_BOUNDARY_START_DATE, minute)
-
-/** 日期控件与滑杆共用；改完统一刷新所有图 */
+/** 日期控件与 dataZoom 共用；改完统一刷新所有图 */
 const applyDisplayWindow = (partial: Partial<DisplayWindow>) => {
   const fullMax = timelineEndMinute.value
   let start = partial.start ?? displayWindow.value.start
@@ -172,7 +185,7 @@ const applyDisplayWindow = (partial: Partial<DisplayWindow>) => {
   updateTransformedChart()
 }
 
-/** 日期变更：吸附到整天，与滑杆保持同一区间 */
+/** 日期变更：吸附到整天，与 dataZoom 保持同一区间 */
 const onDateStartUpdate = (value: number) => {
   const start = Math.max(0, Math.min(value, displayWindow.value.end - 1))
   applyDisplayWindow({ start })
@@ -181,17 +194,27 @@ const onDateEndUpdate = (value: number) => {
   const end = Math.min(timelineEndMinute.value, Math.max(value, displayWindow.value.start + 1))
   applyDisplayWindow({ end })
 }
-const onRangeStartUpdate = (value: number) => applyDisplayWindow({ start: value })
-const onRangeEndUpdate = (value: number) => applyDisplayWindow({ end: value })
 
+const zoomDomain = computed(() => ({
+  start: 0,
+  end: Math.max(1, timelineEndMinute.value)
+}))
+
+/**
+ * 与运行总览共用同一套 dataZoom 状态机。
+ * 事件期间只更新 option，不销毁图表实例，避免滑条拖动中的指针捕获被打断。
+ */
+const boundaryZoom = useSharedDataZoom({
+  getChart: () => rawChartInstance,
+  getPeerCharts: () => Object.values(transformedChartInstances),
+  getWindow: () => displayWindow.value,
+  getDomain: () => zoomDomain.value,
+  onWindowChange: win => applyDisplayWindow(win)
+})
+
+/** 先截取当前细窗，再按同一细窗跨度抽稀，避免小窗桶宽作用于全年数据而提前耗尽点数上限。 */
 const filterByWindow = (timestamps: string[], values: number[], win: DisplayWindow) => {
-  const points: Array<[number, number]> = []
-  for (let i = 0; i < timestamps.length; i++) {
-    const m = timeLabelToMinutes(timestamps[i]!)
-    if (m >= win.start && m <= win.end) {
-      points.push([m, Number(values[i])])
-    }
-  }
+  const points = pairTimeSeriesWindow(timestamps, values, win.start, win.end)
   return downsampleTimeSeries(points, win.start, win.end)
 }
 
@@ -202,6 +225,64 @@ const importingData = ref(false)
 const transformingData = ref(false)
 const submittingBoundary = ref(false)
 const loadingBoundaryId = ref<string | null>(null)
+
+// boundary.db 已有数据的边界 ID（用于标签状态：已关联 / 空数据 / 未关联）
+const dbHasDataIds = ref<Set<string>>(new Set())
+
+const refreshBoundaryDbStatus = async () => {
+  if (!project.value?.id) return
+  try {
+    const res = await projectApi.getBoundaryStatus(project.value.id)
+    dbHasDataIds.value = new Set(res?.boundaryIds ?? [])
+  }
+  catch (err) {
+    console.error('查询边界入库状态失败', err)
+  }
+}
+
+const boundaryTabItem = (tabKey: string) => ({
+  id: tabKey,
+  relatedComponents: project.value?.boundaries.find(b => b.id === tabKey)?.relatedComponents
+})
+
+/** 拟合模型是否已有内容（拟合结果 / 曲线 / 公式） */
+const hasFittingData = (model: FittingModel): boolean =>
+  Boolean(model.params) || (model.curve?.length ?? 0) > 0 || Boolean(model.formulaText)
+
+/** AGC 无组件关联概念：仅看 boundary.db 是否有数据 */
+const isAgcBoundary = (tabKey: string): boolean => {
+  const item = project.value?.boundaries.find(b => b.id === tabKey)
+  return item ? resolveBoundaryModuleKey(item) === 'agc' : false
+}
+
+/** 标签状态：边界看 boundary.db；拟合看自身模型是否为空 */
+const tabStatusOf = (tabKey: string, kind: 'boundary' | 'fitting'): BoundaryDataStatus => {
+  if (kind === 'fitting') {
+    const model = project.value?.fittingModels?.find(m => m.id === tabKey)
+    if (!model) return 'unlinked'
+    return resolveBoundaryDataStatus(model, hasFittingData(model))
+  }
+  if (isAgcBoundary(tabKey)) {
+    return dbHasDataIds.value.has(tabKey) ? 'ready' : 'empty'
+  }
+  return resolveBoundaryDataStatus(boundaryTabItem(tabKey), dbHasDataIds.value.has(tabKey))
+}
+
+const tabStatusLabelOf = (tabKey: string, kind: 'boundary' | 'fitting'): string => {
+  const status = tabStatusOf(tabKey, kind)
+  // AGC 无「已关联/未关联」，只有有数据 / 空数据
+  if (kind === 'boundary' && isAgcBoundary(tabKey)) {
+    return status === 'ready' ? '有数据' : '空数据'
+  }
+  return BOUNDARY_DATA_STATUS_LABELS[status]
+}
+
+const tabStatusTone = (tabKey: string, kind: 'boundary' | 'fitting') => {
+  const status = tabStatusOf(tabKey, kind)
+  if (status === 'ready') return 'bg-emerald-500/15 text-emerald-600'
+  if (status === 'empty') return 'bg-amber-500/15 text-amber-600'
+  return 'bg-zinc-500/15 text-zinc-500'
+}
 
 // ============================================================
 // 修复问题二 & 文件路径共享缓存
@@ -247,8 +328,6 @@ const form = reactive({
   columnName: '',
   timeStep: '1h',
   meaning: 'wind_speed' as BoundaryMeaning,
-  /** 显式单位（负荷等多单位含义）；空则用含义默认 */
-  unit: '' as string,
   relatedComponents: [] as string[],
   interpolateType: 'copy' as const,
   randomDistribution: 'normal' as const,
@@ -257,17 +336,37 @@ const form = reactive({
   calendarStartDate: DEFAULT_BOUNDARY_START_DATE
 })
 
-/** 当前含义可选单位；无多单位选项时只读展示默认单位 */
-const unitOptions = computed(() => {
-  const options = BOUNDARY_MEANING_UNIT_OPTIONS[form.meaning as BoundaryMeaning]
-  if (options && options.length > 0) return options
-  const fallback = BOUNDARY_MEANING_UNITS[form.meaning as BoundaryMeaning] ?? ''
-  return [fallback].filter(Boolean)
+/** 关联组件的 componentKey 列表（用于派生单位） */
+const relatedComponentKeys = computed(() => {
+  if (!project.value) return [] as string[]
+  const ids = new Set(form.relatedComponents)
+  return project.value.workspace.canvases
+    .flatMap(c => c.nodes)
+    .filter(n => ids.has(n.id))
+    .map(n => n.data?.componentKey ?? '')
+    .filter(Boolean)
 })
 
-const unitOptionsForSelect = computed(() =>
-  unitOptions.value.map(u => ({ label: u || '(无单位)', value: u }))
+/**
+ * 展示单位：由含义 + 组件介质派生，只读。
+ * 软件不做单位换算，用户不可配置。
+ */
+const derivedUnit = computed(() =>
+  deriveBoundaryUnit(form.meaning, relatedComponentKeys.value)
 )
+
+const hasUnitConflict = computed(() =>
+  form.meaning === 'load' && hasLoadUnitConflict(relatedComponentKeys.value)
+)
+
+const unitDisplayLabel = computed(() => {
+  if (hasUnitConflict.value) return '单位冲突'
+  const unit = derivedUnit.value
+  if (form.meaning === 'load' && !relatedComponentKeys.value.length) {
+    return unit ? `${unit}（关联组件后确认）` : '待关联组件'
+  }
+  return unit || '无单位'
+})
 
 const calendarEndDate = computed(() => {
   if (!isDateOnly(form.calendarStartDate)) return ''
@@ -312,12 +411,19 @@ watch(() => form.calendarStartDate, () => {
 const project = computed(() => projectState.value)
 
 // 左侧子栏目：点击标题展开/收起，收纳各类边界
-const expandedModules = ref<Set<BoundaryModuleKey>>(new Set(['weather']))
+// 默认全部展开，打开页面即可一目了然
+const expandedModules = ref<Set<BoundaryModuleKey>>(
+  new Set(BOUNDARY_MODULE_OPTIONS.map(option => option.key))
+)
 const toggleModule = (key: BoundaryModuleKey) => {
   const next = new Set(expandedModules.value)
   if (next.has(key)) next.delete(key)
   else next.add(key)
   expandedModules.value = next
+}
+
+const expandAllModules = () => {
+  expandedModules.value = new Set(BOUNDARY_MODULE_OPTIONS.map(option => option.key))
 }
 
 const moduleGroups = computed(() => {
@@ -522,8 +628,12 @@ function submitActiveFitting() {
 const syncBoundaryFormSilently = ref(false)
 let projectSyncTimer: ReturnType<typeof setTimeout> | null = null
 
-const sameStringArray = (left: string[], right: string[]) =>
-  left.length === right.length && left.every((value, index) => value === right[index])
+const sameStringArray = (left: string[], right: string[]) => {
+  if (left.length !== right.length) return false
+  const a = [...left].sort()
+  const b = [...right].sort()
+  return a.every((value, index) => value === b[index])
+}
 
 const refreshCurrentBoundaryReference = () => {
   if (!project.value || !currentBoundary.value) {
@@ -649,12 +759,15 @@ async function initBoundaries() {
     }))
     // 默认展开当前选中项所在栏目，便于定位
     if (tabs.value.length > 0) {
-      activeTab.value = tabs.value[0].key
-      const first = proj.boundaries[0]
-      if (first) {
-        expandedModules.value = new Set([resolveBoundaryModuleKey(first)])
-      }
-      loadBoundary(tabs.value[0].key)
+      // 支持从容量规划「返回边界配置」带 ?boundaryId= 直接定位
+      const deepLinkId = String(route.query.boundaryId ?? '').trim()
+      const deepLinked = deepLinkId
+        ? proj.boundaries.find(b => b.id === deepLinkId)
+        : null
+      const target = deepLinked ?? proj.boundaries[0]
+      activeTab.value = target?.id ?? tabs.value[0]!.key
+      expandAllModules()
+      loadBoundary(activeTab.value)
     }
     // 已有边界时也要补齐设备参数拟合默认标签
     initFittingModels()
@@ -755,7 +868,8 @@ function saveCurrentFormToBoundary() {
   boundary.columnName = form.columnName
   boundary.timeStep = form.timeStep
   boundary.meaning = form.meaning
-  boundary.unit = form.unit || undefined
+  // 单位由含义+组件介质派生，只读；不再写入用户可配置 unit
+  boundary.unit = derivedUnit.value || undefined
   boundary.relatedComponents = setBoundaryRelatedComponentsForActiveCanvas(
     boundary,
     project.value.workspace,
@@ -864,24 +978,29 @@ async function loadBoundaryInternal(id: string) {
     return
   }
 
-  // 直接更新 currentBoundary 和 form
+  // 直接更新 currentBoundary 和 form（silently：加载不算用户改，不触发保存/单位逻辑）
   currentBoundary.value = boundary
-  Object.assign(form, {
-    name: boundary.name,
-    filePath: boundary.filePath,
-    columnName: boundary.columnName,
-    timeStep: boundary.timeStep,
-    meaning: boundary.meaning,
-    unit: boundary.unit ?? '',
-    relatedComponents: getBoundaryRelatedComponentsForActiveCanvas(boundary, project.value.workspace),
-    interpolateType: boundary.interpolateType,
-    randomDistribution: boundary.randomDistribution,
-    noiseLevel: boundary.noiseLevel,
-    timeMode: 'calendar',
-    calendarStartDate: isDateOnly(boundary.boundaryMeta?.calendarStartDate)
-      ? boundary.boundaryMeta.calendarStartDate
-      : DEFAULT_BOUNDARY_START_DATE
-  })
+  syncBoundaryFormSilently.value = true
+  try {
+    Object.assign(form, {
+      name: boundary.name,
+      filePath: boundary.filePath,
+      columnName: boundary.columnName,
+      timeStep: boundary.timeStep,
+      meaning: boundary.meaning,
+      relatedComponents: getBoundaryRelatedComponentsForActiveCanvas(boundary, project.value.workspace),
+      interpolateType: boundary.interpolateType,
+      randomDistribution: boundary.randomDistribution,
+      noiseLevel: boundary.noiseLevel,
+      timeMode: 'calendar',
+      calendarStartDate: isDateOnly(boundary.boundaryMeta?.calendarStartDate)
+        ? boundary.boundaryMeta.calendarStartDate
+        : DEFAULT_BOUNDARY_START_DATE
+    })
+  }
+  finally {
+    syncBoundaryFormSilently.value = false
+  }
   boundaryMeta.value = boundary.boundaryMeta
     ? {
         ...boundary.boundaryMeta,
@@ -1077,7 +1196,7 @@ function createBoundary(moduleKey?: BoundaryModuleKey) {
     columnName: '',
     timeStep: '1h',
     meaning: defaultMeaning,
-    unit: BOUNDARY_MEANING_UNITS[defaultMeaning] ?? '',
+    unit: deriveBoundaryUnit(defaultMeaning) || undefined,
     relatedComponents: [],
     interpolateType: 'copy',
     randomDistribution: 'normal',
@@ -1185,6 +1304,7 @@ async function confirmDeleteBoundary() {
   }
 
   scheduleProjectSyncPersist()
+  void refreshBoundaryDbStatus()
 }
 
 // 持久化边界到后端
@@ -1196,13 +1316,34 @@ async function persistBoundaries() {
     return
   }
   try {
-    await projectApi.saveBoundaries(projectId.value, project.value.boundaries)
+    await projectApi.saveBoundaries(projectId.value, project.value.boundaries, project.value.fittingModels)
   } catch (err) {
     console.error('[Boundary] 保存边界失败:', err)
   }
 }
 
 const handleRelatedComponentsChange = (value: string[]) => {
+  // 负荷不可同时挂电/热（kW）与氢（kg/h）组件——软件不做单位换算
+  if (form.meaning === 'load') {
+    const keys = (() => {
+      if (!project.value) return [] as string[]
+      const ids = new Set(value)
+      return project.value.workspace.canvases
+        .flatMap(c => c.nodes)
+        .filter(n => ids.has(n.id))
+        .map(n => n.data?.componentKey ?? '')
+        .filter(Boolean)
+    })()
+    if (hasLoadUnitConflict(keys)) {
+      push({
+        tone: 'danger',
+        title: '无法关联',
+        description: '负荷边界不能同时关联电/热（kW）与氢（kg/h）组件'
+      })
+      return
+    }
+  }
+
   form.relatedComponents = value
 
   if (syncBoundaryFormSilently.value || !currentBoundary.value) {
@@ -1404,6 +1545,13 @@ async function submitBoundary() {
     saveCurrentFormToBoundary()
     syncProjectFromBoundaries()
     await flushProjectSyncPersist()
+    await refreshBoundaryDbStatus()
+
+    // 时序已在 boundary.db；释放内存中的大数组，图表用当前 rawData ref
+    if (currentBoundary.value) {
+      delete currentBoundary.value.rawData
+      delete currentBoundary.value.transformedData
+    }
 
     push({ tone: 'success', title: '边界配置已提交' })
   } catch (err) {
@@ -1441,24 +1589,20 @@ function updateRawChart() {
     console.warn('updateRawChart: ref or data is missing', rawChartRef.value, rawData.value)
     return
   }
+  if (rawChartRenderFrame) return
 
-  // 销毁旧实例（如果存在）
-  if (rawChartInstance) {
-    rawChartInstance.dispose()
-    rawChartInstance = null
-  }
-
-  // 等待 DOM 更新完成
-  nextTick(() => {
+  // 合并同一帧内连续的 dataZoom 事件，避免拖动时重复解析 8760 点。
+  rawChartRenderFrame = requestAnimationFrame(() => {
+    rawChartRenderFrame = 0
     if (!rawChartRef.value) return
 
     // 确保容器有尺寸
     const container = rawChartRef.value
 
-    rawChartInstance = echarts.init(container)
+    rawChartInstance ??= echarts.init(container)
 
     // 使用中文label作为纵坐标名称
-    const yAxisName = boundaryAxisName(form.meaning, form.unit)
+    const yAxisName = boundaryAxisName(form.meaning, derivedUnit.value)
     // X 为时间轴；Y 带物理单位，如「风速 (m/s)」
 
     const win = displayWindow.value
@@ -1477,13 +1621,14 @@ function updateRawChart() {
         left: '3%',
         right: '3%',
         top: 35,
-        bottom: '8%',
+        bottom: 56,
         containLabel: true
       },
+      dataZoom: boundaryZoom.buildDataZoom(),
       xAxis: {
         type: 'value' as const,
-        min: win.start,
-        max: win.end,
+        min: zoomDomain.value.start,
+        max: zoomDomain.value.end,
         name: '时间',
         nameLocation: 'middle' as const,
         nameGap: 30,
@@ -1516,21 +1661,36 @@ function updateRawChart() {
       }]
     }
 
-    rawChartInstance.setOption(option)
+    rawChartInstance.setOption(option, {
+      notMerge: false,
+      lazyUpdate: true,
+      replaceMerge: ['series']
+    })
     rawChartInstance.resize()
+    boundaryZoom.attachDataZoomEvents()
   })
 }
 
 // 更新转换后数据图表（每层单独一个图）
 function updateTransformedChart() {
   if (!transformedData.value) return
+  if (transformedChartRenderFrame) return
 
-  nextTick(() => {
+  // 多层图只在下一动画帧统一更新一次，保持滑条平移流畅。
+  transformedChartRenderFrame = requestAnimationFrame(() => {
+    transformedChartRenderFrame = 0
     // SSR 环境下 document 不存在，跳过
     if (typeof document === 'undefined') return
 
     // 使用中文label作为纵坐标名称
-    // yAxisName 在每层图内通过 boundaryAxisName(form.meaning, form.unit) 计算
+    // yAxisName 在每层图内通过 boundaryAxisName(form.meaning, derivedUnit.value) 计算
+
+    const activeLayerIds = new Set(transformedData.value!.layers.map(layer => layer.layerId))
+    for (const [layerId, instance] of Object.entries(transformedChartInstances)) {
+      if (activeLayerIds.has(layerId)) continue
+      instance.dispose()
+      delete transformedChartInstances[layerId]
+    }
 
     // 为每一层渲染独立的图表
     for (const layer of transformedData.value!.layers) {
@@ -1538,16 +1698,18 @@ function updateTransformedChart() {
       if (!el) continue
 
       let instance = transformedChartInstances[layer.layerId]
-      if (instance) {
+      // 切换边界时 Vue 可能替换图表 DOM；仅在 DOM 确实变化时重建实例。
+      if (instance && instance.getDom() !== el) {
         instance.dispose()
+        delete transformedChartInstances[layer.layerId]
+        instance = undefined
       }
-
-      instance = echarts.init(el)
+      instance ??= echarts.init(el)
       transformedChartInstances[layer.layerId] = instance
 
       const win = displayWindow.value
       const points = filterByWindow(layer.timestamps, layer.values, win)
-      const yName = boundaryAxisName(form.meaning, form.unit)
+      const yName = boundaryAxisName(form.meaning, derivedUnit.value)
 
       instance.setOption({
         animation: false,
@@ -1559,12 +1721,13 @@ function updateTransformedChart() {
         },
         tooltip: { trigger: 'axis' },
         grid: {
-          left: '3%', right: '3%', top: 35, bottom: '8%', containLabel: true
+          left: '3%', right: '3%', top: 35, bottom: 56, containLabel: true
         },
+        dataZoom: boundaryZoom.buildDataZoom(),
         xAxis: {
           type: 'value',
-          min: win.start,
-          max: win.end,
+          min: zoomDomain.value.start,
+          max: zoomDomain.value.end,
           name: '时间',
           nameLocation: 'middle',
           nameGap: 30,
@@ -1595,13 +1758,20 @@ function updateTransformedChart() {
           itemStyle: { color: '#165DFF' },
           animation: false
         }]
+      }, {
+        notMerge: false,
+        lazyUpdate: true,
+        replaceMerge: ['series']
       })
     }
+    boundaryZoom.attachDataZoomEvents()
   })
 }
 
 // 清理图表
 onBeforeUnmount(() => {
+  if (rawChartRenderFrame) cancelAnimationFrame(rawChartRenderFrame)
+  if (transformedChartRenderFrame) cancelAnimationFrame(transformedChartRenderFrame)
   rawChartInstance?.dispose()
   Object.values(transformedChartInstances).forEach(inst => inst.dispose())
 })
@@ -1615,7 +1785,7 @@ onMounted(() => {
 })
 
 useHead(() => ({
-  title: project.value ? `${project.value.name} - 边界配置` : '边界配置 - SynerRoll'
+  title: project.value ? `${project.value.name} - 边界配置` : '边界配置 - 新能源发电系统灵活性量化评估软件'
 }))
 
 // 返回编辑页
@@ -1656,6 +1826,7 @@ watch(() => data.value?.project, (proj) => {
     }
     projectState.value = proj
     initBoundaries()
+    void refreshBoundaryDbStatus()
   }
 }, { immediate: true })
 
@@ -1739,16 +1910,8 @@ watch(() => form.timeStep, (newTimeStep) => {
 })
 
 // meaning 字段实时保存；切换含义时重置为该含义默认单位
-watch(() => form.meaning, (newMeaning) => {
-  const options = BOUNDARY_MEANING_UNIT_OPTIONS[newMeaning as BoundaryMeaning]
-  form.unit = options?.[0] ?? BOUNDARY_MEANING_UNITS[newMeaning as BoundaryMeaning] ?? ''
-  if (!currentBoundary.value || syncBoundaryFormSilently.value) return
-  saveCurrentFormToBoundary()
-  scheduleProjectSyncPersist()
-})
-
-// unit 字段实时保存（负荷 kW / kg/h 等）
-watch(() => form.unit, () => {
+watch(() => form.meaning, () => {
+  // 单位只读派生，含义变更不重写任何用户字段；仅在用户主动改时落盘
   if (!currentBoundary.value || syncBoundaryFormSilently.value) return
   saveCurrentFormToBoundary()
   scheduleProjectSyncPersist()
@@ -1880,6 +2043,12 @@ watch(() => form.noiseLevel, (newVal) => {
                     <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
                   </svg>
                   <span class="truncate">{{ tab.label }}</span>
+                  <span
+                    class="shrink-0 rounded px-1 text-[10px] leading-4"
+                    :class="tabStatusTone(tab.key, tab.kind)"
+                  >
+                    {{ tabStatusLabelOf(tab.key, tab.kind) }}
+                  </span>
                 </span>
                 <button
                   v-if="editingBoundaryId !== tab.key"
@@ -1945,12 +2114,19 @@ watch(() => form.noiseLevel, (newVal) => {
                 :options="meaningOptions"
               />
             </div>
-            <div class="flex items-center gap-2 w-1/8 min-w-[120px]">
+            <div class="flex items-center gap-2 min-w-[120px]">
               <label class="w-12 text-sm text-app shrink-0">单位</label>
-              <PropertySelect
-                v-model="form.unit"
-                :options="unitOptionsForSelect"
-              />
+              <div
+                class="flex-1 min-h-[32px] px-2 py-1 rounded border text-sm"
+                :class="hasUnitConflict
+                  ? 'border-app-danger text-app-danger bg-app-danger/10'
+                  : 'border-app-border text-app-muted bg-app-bg'"
+                :title="hasUnitConflict
+                  ? '负荷边界不能同时关联电/热（kW）与氢（kg/h）组件'
+                  : '单位由物理含义与关联组件自动确定，无需配置'"
+              >
+                {{ unitDisplayLabel }}
+              </div>
             </div>
             <div class="flex items-center gap-2 w-1/6 justify-end">
               <AppButton
@@ -2025,16 +2201,6 @@ watch(() => form.noiseLevel, (newVal) => {
               :max="timelineEndMinute"
               @update:start="onDateStartUpdate"
               @update:end="onDateEndUpdate"
-            />
-            <PrimaryDualRangeSlider
-              :start="displayWindow.start"
-              :end="displayWindow.end"
-              :min="0"
-              :max="timelineEndMinute"
-              :step="1"
-              :format-label="formatWindowLabel"
-              @update:start="onRangeStartUpdate"
-              @update:end="onRangeEndUpdate"
             />
           </div>
         </div>
@@ -2128,16 +2294,6 @@ watch(() => form.noiseLevel, (newVal) => {
               :max="timelineEndMinute"
               @update:start="onDateStartUpdate"
               @update:end="onDateEndUpdate"
-            />
-            <PrimaryDualRangeSlider
-              :start="displayWindow.start"
-              :end="displayWindow.end"
-              :min="0"
-              :max="timelineEndMinute"
-              :step="1"
-              :format-label="formatWindowLabel"
-              @update:start="onRangeStartUpdate"
-              @update:end="onRangeEndUpdate"
             />
           </div>
         </div>

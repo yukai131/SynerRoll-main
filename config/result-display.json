@@ -1,0 +1,186 @@
+{
+  "schema": "result-display-preferences-v1",
+  "comment": "结果变量展示优先级与默认显隐。order 越小越靠前；visible=false 默认隐藏。此文件为全局默认配置，修改后刷新页面生效。E类order以1开头，H类以2开头，Q类以3开头，order不必连续",
+  "preferences": {
+    "BUS|E_SHORTAGE": {
+      "order": 101,
+      "visible": true
+    },
+    "BUS|E_EXCESS": {
+      "order": 102,
+      "visible": true
+    },
+    "GRID|E_GRID_in": {
+      "order": 107,
+      "visible": true
+    },
+    "GRID|E_GRID_out": {
+      "order": 108,
+      "visible": true
+    },
+    "E_ELOAD|E_ELOAD": {
+      "order": 109,
+      "visible": true
+    },
+    "WT|E_WT": {
+      "order": 110,
+      "visible": true
+    },
+    "PV|E_PV": {
+      "order": 111,
+      "visible": true
+    },
+    "CP|E_CP": {
+      "order": 112,
+      "visible": true
+    },
+    "GP|E_GP": {
+      "order": 113,
+      "visible": true
+    },
+    "CHP|E_CHP": {
+      "order": 114,
+      "visible": true
+    },
+    "HYDRO|E_HYDRO": {
+      "order": 115,
+      "visible": true
+    },
+    "ES|E_ES": {
+      "order": 116,
+      "visible": true
+    },
+    "PS|E_PS": {
+      "order": 117,
+      "visible": true
+    },
+    "FS|E_FS": {
+      "order": 118,
+      "visible": true
+    },
+    "CS|E_CS": {
+      "order": 119,
+      "visible": true
+    },
+    "ET|E_ET": {
+      "order": 120,
+      "visible": true
+    },
+    "ES|E_ES_in": {
+      "order": 130,
+      "visible": false
+    },
+    "ES|E_ES_out": {
+      "order": 131,
+      "visible": false
+    },
+    "PS|E_PS_in": {
+      "order": 134,
+      "visible": false
+    },
+    "PS|E_PS_out": {
+      "order": 135,
+      "visible": false
+    },
+    "FS|E_FS_in": {
+      "order": 136,
+      "visible": false
+    },
+    "FS|E_FS_out": {
+      "order": 137,
+      "visible": false
+    },
+    "CS|E_CS_in": {
+      "order": 138,
+      "visible": false
+    },
+    "CS|E_CS_out": {
+      "order": 139,
+      "visible": false
+    },
+    "CP|F_CP": {
+      "order": 170,
+      "visible": false
+    },
+    "GP|F_GP": {
+      "order": 171,
+      "visible": false
+    },
+    "CHP|F_CHP": {
+      "order": 172,
+      "visible": false
+    },
+    "WT|E_WT_cut": {
+      "order": 180,
+      "visible": true
+    },
+    "WT|AVAILABLE_WT": {
+      "order": 181,
+      "visible": true
+    },
+    "PV|E_PV_cut": {
+      "order": 182,
+      "visible": true
+    },
+    "HYDRO|AVAILABLE_HYDRO": {
+      "order": 183,
+      "visible": true
+    },
+    "HYDRO|MINIMUM_HYDRO": {
+      "order": 184,
+      "visible": true
+    },
+    "BUS|H_SHORTAGE": {
+      "order": 201,
+      "visible": true
+    },
+    "BUS|H_EXCESS": {
+      "order": 202,
+      "visible": true
+    },
+    "HGRID|H_HGRID_in": {
+      "order": 207,
+      "visible": true
+    },
+    "HGRID|H_HGRID_out": {
+      "order": 208,
+      "visible": true
+    },
+    "H_HLOAD|H_HLOAD": {
+      "order": 209,
+      "visible": true
+    },
+    "ET|H_ET": {
+      "order": 220,
+      "visible": true
+    },
+    "HS|H_HS_in": {
+      "order": 232,
+      "visible": false
+    },
+    "HS|H_HS_out": {
+      "order": 233,
+      "visible": false
+    },
+    "HS|H_HS": {
+      "order": 241,
+      "visible": true
+    },
+    "BUS|Q_SHORTAGE": {
+      "order": 301,
+      "visible": true
+    },
+    "BUS|Q_EXCESS": {
+      "order": 302,
+      "visible": true
+    },
+    "Q_QLOAD|Q_QLOAD": {
+      "order": 309,
+      "visible": true
+    },
+    "CHP|Q_CHP": {
+      "order": 310,
+      "visible": true
+    }
+  }
+}

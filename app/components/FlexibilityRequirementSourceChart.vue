@@ -4,6 +4,7 @@ import type { FlexibilityDisplayWindow } from '~~/types/flexibility-display'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { timeLabelToMinutes } from '~~/utils/timeLabel'
 import { useVisibleChart } from '~~/composables/useVisibleChart'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 
 type RequirementSource = 'net_load_change' | 'agc_or_schedule' | 'user_defined'
 
@@ -39,9 +40,9 @@ const { schedule: scheduleRender } = useVisibleChart(chartRef, () => render(),
 let resizeObserver: ResizeObserver | null = null
 
 const title = computed(() => {
-  if (props.source === 'net_load_change') return '灵活性需求来源 · 净负荷变化'
-  if (props.source === 'agc_or_schedule') return '灵活性需求来源 · AGC/计划跟踪'
-  return '灵活性需求来源 · 用户自定义'
+  if (props.source === 'net_load_change') return '灵活性需求来源 - 净负荷变化'
+  if (props.source === 'agc_or_schedule') return '灵活性需求来源 - AGC/计划跟踪'
+  return '灵活性需求来源 - 用户自定义'
 })
 
 const simStartMinutes = computed(() => timeLabelToMinutes(props.simStartTime ?? '0:00'))
@@ -74,13 +75,19 @@ function updateDateRangeEnd(value: number): void {
   })
 }
 
-function updateRangeStart(value: number): void {
-  emit('update:displayWindow', { ...displayWindow.value, start: value })
-}
+const zoomDomain = computed(() => ({
+  start: displayWindow.value.dateStart,
+  end: Math.max(displayWindow.value.dateStart + 1, displayWindow.value.dateEnd)
+}))
 
-function updateRangeEnd(value: number): void {
-  emit('update:displayWindow', { ...displayWindow.value, end: value })
-}
+const sharedZoom = useSharedDataZoom({
+  getChart: () => chart,
+  getWindow: () => ({ start: displayWindow.value.start, end: displayWindow.value.end }),
+  getDomain: () => zoomDomain.value,
+  onWindowChange: (win) => {
+    emit('update:displayWindow', { ...displayWindow.value, start: win.start, end: win.end })
+  }
+})
 
 function setNetLoadDisplayMode(mode: 'level' | 'change'): void {
   netLoadDisplayMode.value = mode
@@ -89,7 +96,7 @@ function setNetLoadDisplayMode(mode: 'level' | 'change'): void {
 const visibleRows = computed(() => props.rows
   .filter(row => {
     const minute = timeLabelToMinutes(row.timestamp)
-    return minute >= displayWindow.value.start && minute < displayWindow.value.end
+    return minute >= zoomDomain.value.start && minute < zoomDomain.value.end
   })
   .sort((left, right) => timeLabelToMinutes(left.timestamp) - timeLabelToMinutes(right.timestamp)))
 
@@ -247,11 +254,12 @@ function render(): void {
       itemHeight: 8,
       textStyle: { fontSize: 11, color: '#475467' }
     },
-    grid: { left: 70, right: 24, top: 38, bottom: 30 },
+    grid: { left: 70, right: 24, top: 38, bottom: 48 },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'value',
-      min: displayWindow.value.start,
-      max: displayWindow.value.end,
+      min: zoomDomain.value.start,
+      max: zoomDomain.value.end,
       axisLabel: { fontSize: 10, formatter: (minute: number) => formatTime(minute) },
       splitLine: { show: false },
       axisLine: { lineStyle: { color: '#D0D5DD' } }
@@ -285,12 +293,17 @@ function render(): void {
       } : {})
     }))
   }, true)
+  sharedZoom.attachDataZoomEvents()
 }
 
 watch(
   [() => props.rows, () => props.source, netLoadDisplayMode,
-    () => displayWindow.value.start, () => displayWindow.value.end],
-  scheduleRender
+    () => displayWindow.value.start, () => displayWindow.value.end,
+    () => displayWindow.value.dateStart, () => displayWindow.value.dateEnd],
+  () => {
+    scheduleRender()
+    sharedZoom.syncDataZoomFromWindow()
+  }
 )
 
 onMounted(() => {
@@ -353,16 +366,6 @@ onBeforeUnmount(() => {
         :max="sliderMax"
         @update:start="updateDateRangeStart"
         @update:end="updateDateRangeEnd"
-      />
-      <PrimaryDualRangeSlider
-        :start="displayWindow.start"
-        :end="displayWindow.end"
-        :min="displayWindow.dateStart"
-        :max="displayWindow.dateEnd"
-        :step="sliderStepMinutes"
-        :format-label="formatTime"
-        @update:start="updateRangeStart"
-        @update:end="updateRangeEnd"
       />
     </div>
   </section>

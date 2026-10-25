@@ -26,6 +26,7 @@ export const JULIA = {
   boundarySubmit: () => juliaUrl('/api/boundary/submit'),
   boundaryTransform: () => juliaUrl('/api/boundary/transform'),
   boundaryDelete: () => juliaUrl('/api/boundary/delete'),
+  boundaryStatus: () => juliaUrl('/api/boundary/status'),
   fittingFit: () => juliaUrl('/api/fitting/fit'),
   capacityPlanning: () => juliaUrl('/api/capacity-planning'),
   capacityValidate: () => juliaUrl('/api/capacity-planning/validate'),

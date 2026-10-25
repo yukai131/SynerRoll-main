@@ -7,7 +7,6 @@ import {
   defaultDisplayUnit,
   minutesToTimestamp,
   timestampToMinutes,
-  unitOptionsForDimension,
   type DeviceOutputLiveData,
   type DeviceOutputVariable
 } from '~~/utils/deviceOutputData'
@@ -173,7 +172,7 @@ const displayedSeries = computed<DisplayedSeries[]>(() => selectedVariables.valu
       variable,
       layerId,
       name: props.layerIds.length > 1
-        ? `${variable.displayName} · ${props.layerLabels[layerId] ?? `时层${layerId}`}`
+        ? `${variable.displayName} - ${props.layerLabels[layerId] ?? `时层${layerId}`}`
         : variable.displayName
     }))
 )))
@@ -212,13 +211,6 @@ const dateRangeEndMinute = computed(() => props.dateRangeEnd)
 const timelineSpanMinutes = computed(() => Math.max(1, maximumMinute.value - minimumMinute.value))
 const rangeStartMinute = computed(() => minimumMinute.value + timelineSpanMinutes.value * props.zoomStart / 100)
 const rangeEndMinute = computed(() => minimumMinute.value + timelineSpanMinutes.value * props.zoomEnd / 100)
-const sliderStepMinutes = computed(() => {
-  const sorted = [...new Set(dataMinutes.value)].sort((left, right) => left - right)
-  const steps = sorted.slice(1)
-    .map((minute, index) => minute - sorted[index]!)
-    .filter(step => Number.isFinite(step) && step > 0)
-  return Math.min(...steps, 5)
-})
 const hourlyTicks = computed(() => {
   const ticks = Array.from(
     { length: Math.floor(maximumMinute.value / 60) + 1 },
@@ -340,7 +332,7 @@ function render(): void {
       left: 96 + Math.max(0, leftAxisCount - 1) * 54,
       right: 64 + Math.max(0, rightAxisCount - 1) * 54,
       top: 64,
-      bottom: 32,
+      bottom: 48,
       containLabel: false
     },
     xAxis: {
@@ -409,27 +401,36 @@ function render(): void {
         return html
       }
     },
-    dataZoom: [{
-      type: 'inside',
-      start: props.analysisMode === 'range' ? props.zoomStart : 0,
-      end: props.analysisMode === 'range' ? props.zoomEnd : 100,
-      filterMode: 'none',
-      disabled: true,
-      zoomOnMouseWheel: false,
-      moveOnMouseWheel: false,
-      moveOnMouseMove: false,
-      preventDefaultMouseMove: false
-    }],
+    dataZoom: [
+      {
+        type: 'inside',
+        start: props.analysisMode === 'range' ? props.zoomStart : 0,
+        end: props.analysisMode === 'range' ? props.zoomEnd : 100,
+        filterMode: 'none',
+        zoomOnMouseWheel: true,
+        moveOnMouseWheel: true,
+        moveOnMouseMove: true
+      },
+      {
+        type: 'slider',
+        start: props.analysisMode === 'range' ? props.zoomStart : 0,
+        end: props.analysisMode === 'range' ? props.zoomEnd : 100,
+        filterMode: 'none',
+        height: 18,
+        bottom: 4
+      }
+    ],
     series
   }, {
     notMerge: true,
     lazyUpdate: true
   })
+
+  chart.off('datazoom')
+  chart.on('datazoom', handleDataZoomEvent)
 }
 
-function handleAxisUnitChange(dimension: string, event: Event): void {
-  emit('update:unit', { dimension, unit: (event.target as HTMLSelectElement).value })
-}
+
 
 const traceCommittedIndex = computed(() => {
   const index = props.traceOptions.findIndex(option => option.step === props.traceStep)
@@ -498,20 +499,6 @@ const visibleRangeLabel = computed(() => {
   return `${formatTimelineLabel(rangeStartMinute.value)} - ${formatTimelineLabel(rangeEndMinute.value)}`
 })
 
-function onRangeStartUpdate(startMinute: number): void {
-  emit('update:zoom', {
-    start: (startMinute - minimumMinute.value) / timelineSpanMinutes.value * 100,
-    end: props.zoomEnd
-  })
-}
-
-function onRangeEndUpdate(endMinute: number): void {
-  emit('update:zoom', {
-    start: props.zoomStart,
-    end: (endMinute - minimumMinute.value) / timelineSpanMinutes.value * 100
-  })
-}
-
 function onDateRangeStartUpdate(startMinute: number): void {
   emit('update:dateRange', { start: startMinute, end: props.dateRangeEnd })
   emit('update:zoom', {
@@ -526,6 +513,19 @@ function onDateRangeEndUpdate(endMinute: number): void {
     start: (props.dateRangeStart - minimumMinute.value) / timelineSpanMinutes.value * 100,
     end: (endMinute - minimumMinute.value) / timelineSpanMinutes.value * 100
   })
+}
+
+/** 图内 dataZoom（替代 PrimaryDualRangeSlider）→ 回写共享 zoom 百分比 */
+function handleDataZoomEvent(params: unknown): void {
+  const raw = params as { batch?: Array<{ start?: number; end?: number }> } | { start?: number; end?: number } | null
+  const item = Array.isArray((raw as { batch?: unknown })?.batch)
+    ? (raw as { batch: Array<{ start?: number; end?: number }> }).batch[0]
+    : (raw as { start?: number; end?: number } | null)
+  if (!item || item.start === undefined || item.end === undefined) return
+  const start = Math.min(100, Math.max(0, Number(item.start)))
+  const end = Math.min(100, Math.max(0, Number(item.end)))
+  if (Math.abs(start - props.zoomStart) < 0.05 && Math.abs(end - props.zoomEnd) < 0.05) return
+  emit('update:zoom', { start: Math.min(start, end), end: Math.max(start, end) })
 }
 
 function csvCell(value: string): string {
@@ -618,20 +618,6 @@ onBeforeUnmount(() => {
     <div v-if="selectedVariables.length" class="flex flex-1 flex-col">
       <div class="relative min-h-[360px] flex-1">
         <div ref="chartRef" class="h-full min-h-[360px] w-full" />
-        <div v-if="axisGroups.length" class="flex flex-wrap items-center gap-2 px-8 py-2">
-          <label v-for="group in axisGroups" :key="group.dimension" class="inline-flex items-center gap-1 text-xs text-app-muted">
-            <span>{{ group.label }}</span>
-            <select
-              :value="group.unit"
-              class="h-6 border border-app-border bg-white px-1 text-xs text-app-text"
-              @change="handleAxisUnitChange(group.dimension, $event)"
-            >
-              <option v-for="option in unitOptionsForDimension(group.dimension, group.variables[0]!.originalUnit)" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-        </div>
         <div
           v-if="analysisMode === 'point' && traceLoading"
           class="absolute inset-0 flex items-center justify-center bg-white/75 text-sm text-app-muted"
@@ -647,27 +633,10 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="flex flex-wrap items-center gap-3 border-t border-app-border px-4 py-2.5 text-xs">
-        <button
-          type="button"
-          class="rounded-[4px] border px-3 py-1 transition"
-          :class="analysisMode === 'range' ? 'border-primary bg-primary-soft text-primary' : 'border-app-border text-app-muted'"
-          @click="emit('update:mode', 'range')"
-        >
-          时间段窗口
-        </button>
-        <button
-          type="button"
-          class="rounded-[4px] border px-3 py-1 transition"
-          :class="analysisMode === 'point' ? 'border-primary bg-primary-soft text-primary' : 'border-app-border text-app-muted'"
-          @click="emit('update:mode', 'point')"
-        >
-          时间点追溯
-        </button>
-        <span v-if="analysisMode === 'range'" class="ml-auto text-app-muted">当前范围 {{ visibleRangeLabel }}</span>
-        <span v-else class="ml-auto text-app-muted">追溯时刻 {{ tracePreview?.simTime ?? '--:--' }}</span>
+        <span class="ml-auto text-app-muted">当前范围 {{ visibleRangeLabel }}</span>
       </div>
 
-      <div v-if="analysisMode === 'range'" class="px-5">
+      <div class="px-5">
         <CalendarRangeInputs
           v-if="simStartDate"
           :base-date="simStartDate"
@@ -678,44 +647,6 @@ onBeforeUnmount(() => {
           @update:start="onDateRangeStartUpdate"
           @update:end="onDateRangeEndUpdate"
         />
-        <PrimaryDualRangeSlider
-          :start="rangeStartMinute"
-          :end="rangeEndMinute"
-          :min="dateRangeStartMinute"
-          :max="dateRangeEndMinute"
-          :step="sliderStepMinutes"
-          :format-label="formatTimelineLabel"
-          @update:start="onRangeStartUpdate"
-          @update:end="onRangeEndUpdate"
-        />
-      </div>
-
-      <div v-else class="bg-app-panel-soft/45 px-5 pb-4 pt-2 text-xs">
-        <p v-if="traceError" class="text-app-danger">历史快照读取失败：{{ traceError }}</p>
-        <template v-else-if="selectedTrace">
-          <div class="relative h-4">
-            <div class="absolute inset-x-2 top-1.5 h-1 rounded-full bg-app-border">
-              <div class="h-1 rounded-full bg-primary" :style="traceSelectionStyle" />
-            </div>
-            <input
-              :value="traceDraftIndex"
-              type="range"
-              min="0"
-              :max="Math.max(0, traceOptions.length - 1)"
-              step="1"
-              :disabled="traceOptions.length < 2"
-              class="device-output-trace-input absolute inset-x-0 top-[-2px] z-10 w-full"
-              aria-label="追溯时刻"
-              @input="updateTracePreview"
-              @change="commitTraceStep"
-            >
-            <span
-              class="absolute top-4 whitespace-nowrap text-xs text-app-muted"
-              :style="traceLabelStyle"
-            >{{ tracePreview?.simTime }}</span>
-          </div>
-        </template>
-        <p v-else-if="!traceLoading" class="py-2 text-app-muted">所选时间层暂无可追溯的滚动求解时刻。</p>
       </div>
     </div>
 

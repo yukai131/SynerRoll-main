@@ -1,5 +1,4 @@
 # 计算任务 REST + WebSocket 路由
-# 文档：docs/compute-task-architecture.md § 10
 # 依赖：utils/server_utils.jl（json_success / json_error / require_string / optional_string）
 #        services/task_manager.jl（任务 CRUD + ctx）
 #        services/simulation_runner.jl（spawn_task）
@@ -141,18 +140,7 @@ end
 # ───── POST /api/task/{id}/cancel ─────
 @post "/api/task/{id}/cancel" function (req, id)
     try
-        lock(TASK_CONTEXTS_LOCK) do
-            if !haskey(TASK_CONTEXTS, id)
-                update_task_status!(id, TASK_CANCELLED)
-                return json_success(message = "任务不在运行中，已直接标 cancelled")
-            end
-            ctx = TASK_CONTEXTS[id]
-            try
-                put!(ctx.signal_ch, SIGNAL_CANCEL)
-            catch
-                return json_error("发送 cancel 信号失败")
-            end
-        end
+        cancel_simulation!(String(id))
         return json_success(message = "cancel signal sent")
     catch e
         return json_error("取消异常: $(sprint(showerror, e))")
@@ -162,14 +150,24 @@ end
 # ───── DELETE /api/task/{id}（清理：删任务 DB + tasks.db 记录）──
 @delete "/api/task/{id}" function (req, id)
     try
-        task_dir = joinpath(TASKS_DATA_ROOT, id)
-        if isdir(task_dir)
-            rm(task_dir, recursive = true, force = true)
+        task_id = String(id)
+        ctx = lock(TASK_CONTEXTS_LOCK) do
+            get(TASK_CONTEXTS, task_id, nothing)
         end
+        if ctx !== nothing
+            cancel_simulation!(task_id)
+            # 排队任务没有文件句柄；运行任务必须退出后再清理数据库。
+            if (ctx.process !== nothing || ctx.launching) && ctx.julia_task !== nothing
+                wait(ctx.julia_task)
+            end
+        end
+        task_dir = joinpath(TASKS_DATA_ROOT, task_id)
         close_store(joinpath(task_dir, "timeseries.db"))
-        delete_task!(id)
-        remove_context(id)
-        return json_success(data = Dict("taskId" => id), message = "任务已清理")
+        remove_tree_with_retry(task_dir)
+        # 磁盘数据确认清除后再删索引；若文件仍被占用，列表记录保留以便用户重试。
+        delete_task!(task_id)
+        remove_context(task_id)
+        return json_success(data = Dict("taskId" => task_id), message = "任务及计算数据已清理")
     catch e
         return json_error("清理异常: $(sprint(showerror, e))")
     end
@@ -422,10 +420,11 @@ end
         # 用 for msg in ws 迭代检测客户端断开，辅助定时轮询
         @debug "[TaskWS] no ctx, entering poll loop: task_id=$task_id"
         last_status = ""
+        connected = Ref(true)
         try
             # 启动后台轮询 task 状态
-            poll_task = @async begin
-                while true
+            poll_task = @async try
+                while connected[]
                     task = get_task(task_id)
                     if task === nothing
                         try HTTP.WebSockets.send(ws, JSON3.write(Dict("type" => "error", "message" => "任务不存在"))) catch end
@@ -446,6 +445,8 @@ end
                     end
                     sleep(1)
                 end
+            catch error
+                @debug "[TaskWS] status polling stopped" task_id exception=error
             end
             # 前台：等待客户端消息（保持连接存活），收到任何消息忽略
             for msg in ws
@@ -454,6 +455,8 @@ end
         catch e
             @debug "[TaskWS] poll loop ended: task_id=$task_id err=$(sprint(showerror, e))"
         finally
+            connected[] = false
+            @isdefined(poll_task) && wait(poll_task)
             @debug "[TaskWS] exiting poll loop: task_id=$task_id"
         end
         return
@@ -498,7 +501,7 @@ end
                 data = JSON3.read(String(msg), Dict)
                 sig = get(data, "type", "")
                 if sig == "cancel"
-                    put!(ctx.signal_ch, SIGNAL_CANCEL)
+                    cancel_simulation!(task_id)
                 end
             catch e
                 @warn "[TaskWS] msg parse error" exception=(e, catch_backtrace())

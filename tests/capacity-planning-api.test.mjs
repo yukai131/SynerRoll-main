@@ -8,7 +8,6 @@ import vm from 'node:vm'
 import ts from 'typescript'
 
 const root = resolve(import.meta.dirname, '..')
-const nativeRequire = createRequire(import.meta.url)
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'synerroll-capacity-api-'))
@@ -33,6 +32,10 @@ function fixture() {
     bestEvaluationId: 7, config: { planningLayerId: '1', clustering: { datasetId: 'dataset-1' } } }
   const result = { projectUpdatedAt: 'v1', variables: [{ componentId: 'device', componentKey: 'WT',
     componentName: '风机', unit: 'kW', optimalValue: 200 }] }
+  const scenarios = { scenarioSetHash: 'scenario-hash', dataset: { id: 'dataset-1' },
+    config: { featureIds: ['wind', 'load'], resolutionMinutes: 60 },
+    scenarios: [{ scenarioId: 'scenario-1', series: { wind: Array(24).fill(1) } }],
+    quality: { validDayCount: 365 } }
   const createError = options => Object.assign(new Error(options.message ?? options.statusMessage), options)
   const cache = new Map()
   function load(relative) {
@@ -53,7 +56,8 @@ function fixture() {
       }
       if (id.startsWith('#server/')) return load(`server/${id.slice(8)}.ts`)
       if (id.startsWith('~~/')) return load(`${id.slice(3)}.ts`)
-      return nativeRequire(id)
+      if (id.startsWith('.') && !id.endsWith('.json')) return load(resolve(filename, '..', id.endsWith('.ts') ? id : `${id}.ts`))
+      return createRequire(filename)(id)
     }
     const context = vm.createContext({ module, exports: module.exports, require: mockedRequire,
       process: { cwd: () => directory, env: { JULIA_BACKEND_URL: 'http://127.0.0.1:18991' } },
@@ -68,6 +72,7 @@ function fixture() {
         }
         if (url.includes('/datasets/')) return { success: true, data: { pointCount: 8760, resolutionMinutes: 60 } }
         if (url.endsWith('/result')) return { success: true, data: structuredClone(result) }
+        if (url.endsWith('/scenarios')) return { success: true, data: structuredClone(scenarios) }
         if (url.endsWith('/comparison')) return { success: true, data: { candidates: [{ evaluationId: 7 }] } }
         return { success: true, data: structuredClone(task) }
       }
@@ -76,7 +81,7 @@ function fixture() {
     cache.set(filename, module.exports)
     return module.exports
   }
-  return { directory, load, original, calls, task, result, get project() { return project },
+  return { directory, load, original, calls, task, result, scenarios, get project() { return project },
     set computeFails(value) { computeFails = value },
     close() { rmSync(directory, { recursive: true, force: true }) } }
 }
@@ -175,6 +180,25 @@ test('comparison proxy uses the configured Julia address', async () => {
     const response = await route(f, '[id]/comparison.get.ts')({ params: { id: f.task.id } })
     assert.equal(response.data.candidates[0].evaluationId, 7)
     assert.equal(f.calls[0].url, 'http://127.0.0.1:18991/api/capacity-planning/cp-fixture/comparison')
+  } finally { f.close() }
+})
+
+test('persisted scenario proxy restores the actual scenario set saved by the solver', async () => {
+  const f = fixture()
+  try {
+    const response = await route(f, '[id]/scenarios.get.ts')({ params: { id: f.task.id } })
+    assert.equal(response.data.scenarioSetHash, f.scenarios.scenarioSetHash)
+    assert.equal(response.data.scenarios[0].series.wind.length, 24)
+    assert.equal(f.calls[0].url, 'http://127.0.0.1:18991/api/capacity-planning/cp-fixture/scenarios')
+  } finally { f.close() }
+})
+
+test('cleanup proxy sends DELETE to the capacity-planning task endpoint', async () => {
+  const f = fixture()
+  try {
+    await route(f, '[id].delete.ts')({ params: { id: f.task.id } })
+    assert.equal(f.calls[0].url, 'http://127.0.0.1:18991/api/capacity-planning/cp-fixture')
+    assert.equal(f.calls[0].options.method, 'DELETE')
   } finally { f.close() }
 })
 

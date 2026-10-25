@@ -1,6 +1,6 @@
 # hydrogen_grid/model-common.jl — 共享函数
 #
-# model-base.jl 和 model.jl 共用的参数解析与辅助函数
+# 参数解析与辅助函数。
 # 氢网功率单位统一为 kg/h，价格单位为 元/kg（× time_step_hours 后为 元/kg·步）
 
 function resolve_hydrogen_grid_params(component::HydrogenGrid, ctx::BuildContext)

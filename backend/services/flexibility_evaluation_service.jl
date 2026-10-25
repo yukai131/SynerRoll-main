@@ -167,12 +167,26 @@ function normalize_flexibility_evaluation_config(
 
     if requirement_source == FLEXIBILITY_REQUIREMENT_AGC_SCHEDULE
         target_poi_power_boundary_id = _optional_boundary_id("targetPoiPowerBoundaryId")
-        target_poi_power_boundary_id === nothing && throw(
+        has_target_boundary = target_poi_power_boundary_id !== nothing
+        has_target_value = haskey(raw, "targetPoiPowerKw")
+        (has_target_boundary || has_target_value) || throw(
             ArgumentError(
-                "flexibility.targetPoiPowerBoundaryId is required for agc_or_schedule " *
-                "(boundary series from Jan 1, sliced by simulation dates).",
+                "flexibility.targetPoiPowerBoundaryId or targetPoiPowerKw is required " *
+                "for agc_or_schedule.",
             ),
         )
+        (has_target_boundary && has_target_value) && throw(
+            ArgumentError(
+                "flexibility.targetPoiPowerBoundaryId and targetPoiPowerKw are mutually exclusive.",
+            ),
+        )
+        if !has_target_boundary
+            target_poi_power_kw = _normalize_flexibility_value_spec(
+                raw["targetPoiPowerKw"],
+                "targetPoiPowerKw";
+                nonnegative=false,
+            )
+        end
     elseif requirement_source == FLEXIBILITY_REQUIREMENT_USER_DEFINED
         upward_requirement_boundary_id = _optional_boundary_id("upwardRequirementBoundaryId")
         downward_requirement_boundary_id = _optional_boundary_id("downwardRequirementBoundaryId")
@@ -238,7 +252,11 @@ function flexibility_evaluation_config_dict(config::FlexibilityEvaluationConfig)
         "requirementSource" => config.requirement_source,
     )
     if config.requirement_source == FLEXIBILITY_REQUIREMENT_AGC_SCHEDULE
-        row["targetPoiPowerBoundaryId"] = config.target_poi_power_boundary_id
+        if config.target_poi_power_boundary_id !== nothing
+            row["targetPoiPowerBoundaryId"] = config.target_poi_power_boundary_id
+        else
+            row["targetPoiPowerKw"] = config.target_poi_power_kw
+        end
     elseif config.requirement_source == FLEXIBILITY_REQUIREMENT_USER_DEFINED
         if config.upward_requirement_boundary_id !== nothing
             row["upwardRequirementBoundaryId"] = config.upward_requirement_boundary_id

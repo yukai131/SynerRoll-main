@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import brand from '~~/config/brand.json'
 import type { DocChapter, DocSection } from '~/data/product-docs/types'
 import { productDocChapters } from '~/data/product-docs'
 
@@ -107,7 +108,7 @@ const toneClass = (tone: string) => {
           </button>
           <span class="h-5 w-px bg-white/30" aria-hidden="true" />
           <span class="truncate text-base font-medium">产品文档</span>
-          <span class="hidden text-sm text-white/70 sm:inline">综合能源系统配置策略优化软件</span>
+          <span class="hidden text-sm text-white/70 sm:inline">{{ brand.displayName }}</span>
         </div>
         <button
           type="button"

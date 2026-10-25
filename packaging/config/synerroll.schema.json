@@ -1,43 +1,16 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SynerRoll 配置文件",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "version": { "type": "integer", "const": 1 },
-    "juliaPort": {
-      "type": "integer", "minimum": 1024, "maximum": 65535,
-      "description": "Julia 计算后端 HTTP/WS 端口"
-    },
-    "bffPort": {
-      "type": "integer", "minimum": 1024, "maximum": 65535,
-      "description": "Nuxt BFF 端口（Electron 窗口加载地址）"
-    },
-    "host": {
-      "type": "string", "enum": ["127.0.0.1", "localhost", "0.0.0.0"],
-      "description": "服务绑定地址；内网部署保持 127.0.0.1"
-    },
-    "solver": {
-      "type": "string", "enum": ["HiGHS", "COPT"],
-      "description": "默认求解器。COPT 需自备许可，否则自动回退 HiGHS"
-    },
-    "dataDir": {
-      "type": "string",
-      "description": "用户数据目录（相对安装根目录或绝对路径）"
-    },
-    "logDir": {
-      "type": "string",
-      "description": "日志目录（相对安装根目录或绝对路径）"
+    "version": {
+      "type": "integer"
     },
     "julia": {
       "type": "object",
       "properties": {
-        "heapSizeHintMB": {
-          "type": "integer", "minimum": 0,
-          "description": "Julia 堆上限（MB）；0 表示不限制"
-        },
         "startupTimeoutSec": {
-          "type": "integer", "minimum": 10,
-          "description": "等待 Julia 健康检查的超时秒数"
+          "type": "number",
+          "minimum": 30
         }
       }
     },
@@ -45,19 +18,23 @@
       "type": "object",
       "properties": {
         "startupTimeoutSec": {
-          "type": "integer", "minimum": 10,
-          "description": "等待 BFF 健康检查的超时秒数"
+          "type": "number",
+          "minimum": 10
         }
       }
     },
     "ui": {
       "type": "object",
       "properties": {
-        "openDevTools": { "type": "boolean" },
-        "windowWidth": { "type": "integer", "minimum": 800 },
-        "windowHeight": { "type": "integer", "minimum": 600 }
+        "windowWidth": {
+          "type": "number",
+          "minimum": 1024
+        },
+        "windowHeight": {
+          "type": "number",
+          "minimum": 700
+        }
       }
     }
-  },
-  "required": ["version", "juliaPort", "bffPort"]
+  }
 }

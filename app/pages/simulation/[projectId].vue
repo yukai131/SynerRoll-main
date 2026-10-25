@@ -28,7 +28,7 @@ const project = computed(() => projectState.value)
 const activeCanvasId = computed(() => project.value?.workspace.activeCanvasId ?? '')
 
 useHead(() => ({
-  title: project.value ? `${project.value.name} - 算法配置` : '算法配置 - SynerRoll'
+  title: project.value ? `${project.value.name} - 算法配置` : '算法配置 - 新能源发电系统灵活性量化评估软件'
 }))
 
 const saveProject = async () => {
@@ -66,9 +66,9 @@ const exportBackendPayload = async () => {
           </p>
         </div>
         <div class="flex items-center gap-2">
-          <AppButton label="返回编辑器" icon="shape" tone="neutral" @click="navigateTo(`/editor/${projectId}`)" />
-          <AppButton label="保存配置" icon="docs" tone="neutral" @click="saveProject" />
-          <AppButton label="导出后端载荷" icon="download" tone="primary" @click="exportBackendPayload" />
+          <AppButton label="返回编辑器" tone="neutral" @click="navigateTo(`/editor/${projectId}`)" />
+          <AppButton label="保存配置" tone="neutral" @click="saveProject" />
+          <AppButton label="导出后端载荷" tone="primary" @click="exportBackendPayload" />
         </div>
       </div>
     </div>
@@ -208,9 +208,9 @@ const exportBackendPayload = async () => {
             </div>
 
             <div class="grid grid-cols-3 gap-2">
-              <AppButton label="启动" icon="play" tone="primary" disabled />
-              <AppButton label="暂停" icon="docs" tone="neutral" disabled />
-              <AppButton label="终止" icon="delete" tone="danger" disabled />
+              <AppButton label="启动" tone="primary" disabled />
+              <AppButton label="暂停" tone="neutral" disabled />
+              <AppButton label="终止" tone="danger" disabled />
             </div>
           </div>
         </PanelSection>
@@ -234,8 +234,8 @@ const exportBackendPayload = async () => {
 
         <PanelSection title="页面跳转">
           <div class="space-y-2">
-            <AppButton label="回到项目管理" icon="arrow" tone="neutral" class="w-full justify-center" @click="navigateTo('/project')" />
-            <AppButton label="前往边界配置" icon="chart" tone="neutral" class="w-full justify-center" @click="navigateTo(`/boundary/${projectId}`)" />
+            <AppButton label="回到项目管理" tone="neutral" class="w-full justify-center" @click="navigateTo('/project')" />
+            <AppButton label="前往边界配置" tone="neutral" class="w-full justify-center" @click="navigateTo(`/boundary/${projectId}`)" />
           </div>
         </PanelSection>
       </aside>

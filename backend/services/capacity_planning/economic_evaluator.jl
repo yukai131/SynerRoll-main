@@ -82,17 +82,31 @@ function _slack_unstable_slots(
     sim_start::String,
     sim_end::Union{String,Nothing},
 )
+    counts = _slack_slot_counts(db_path, layer_id, sim_start, sim_end)
+    return counts.unstable
+end
+
+"""按过剩/缺额拆分松弛时段，供前端双轴图展示稳定性构成。"""
+function _slack_slot_counts(
+    db_path::String,
+    layer_id::String,
+    sim_start::String,
+    sim_end::Union{String,Nothing},
+)
     start_min = time_label_to_minutes(sim_start)
     end_min = sim_end !== nothing ? time_label_to_minutes(sim_end) : nothing
-    unstable = Set{Int}()
+    excess = Set{Int}()
+    shortage = Set{Int}()
     store = get_store(db_path)
     lock(store.write_lock) do
         rows = _query(store.db,
-            "SELECT id, layer_id FROM time_series_meta WHERE var_name LIKE '%SHORTAGE%' OR var_name LIKE '%EXCESS%'")
+            "SELECT id, layer_id, var_name FROM time_series_meta WHERE var_name LIKE '%SHORTAGE%' OR var_name LIKE '%EXCESS%'")
         isempty(rows[1]) && return
         for i in 1:length(rows[1])
             String(rows[2][i]) != layer_id && continue
             series_id = rows[1][i]
+            var_name = String(rows[3][i])
+            is_shortage = occursin("SHORTAGE", uppercase(var_name))
             sql = "SELECT ts_min, value FROM time_series_data WHERE series_id=? AND ts_min>=?"
             params = Any[series_id, start_min]
             if end_min !== nothing
@@ -102,11 +116,21 @@ function _slack_unstable_slots(
             data_rows = _query(store.db, sql, params)
             isempty(data_rows[1]) && continue
             for (slot_min, val) in zip(data_rows[1], data_rows[2])
-                Float64(val) > 1.0e-6 && push!(unstable, Int(slot_min))
+                is_meaningful_slack(val) || continue
+                if is_shortage
+                    push!(shortage, Int(slot_min))
+                else
+                    push!(excess, Int(slot_min))
+                end
             end
         end
     end
-    return length(unstable)
+    union_slots = union(excess, shortage)
+    return (
+        excess = length(excess),
+        shortage = length(shortage),
+        unstable = length(union_slots),
+    )
 end
 
 """
@@ -178,7 +202,8 @@ function evaluate_scenario_operating_cost(
     re_used, re_avail = tech.re_used, tech.re_avail
     hydro_gen, thermal_gen, buy_e = tech.hydro_gen, tech.thermal_gen, tech.buy_e
     tech_slots = tech.tech_slots
-    unstable_slots = _slack_unstable_slots(db_path, layer_id, "0:00", scenario_end)
+    slack_counts = _slack_slot_counts(db_path, layer_id, "0:00", scenario_end)
+    unstable_slots = slack_counts.unstable
     if tech_slots <= 0
         tech_slots = max(1, round(Int, 24.0 / max(time_step_hours, 1.0e-9)))
     end
@@ -193,6 +218,9 @@ function evaluate_scenario_operating_cost(
         "purchasedPowerShare" => total_supply > 0 ? 100.0 * buy_e / total_supply : 0.0,
         # 稳定性 = 供需达标率 = 1 − 不稳定时段 / 总时段（c001 §6）
         "stability" => tech_slots > 0 ? 100.0 * (1.0 - unstable_slots / tech_slots) : 100.0,
+        # 稳定性拆分：过剩/缺额时段占比（%），供双轴图展示
+        "stabilityExcessShare" => tech_slots > 0 ? 100.0 * slack_counts.excess / tech_slots : 0.0,
+        "stabilityShortageShare" => tech_slots > 0 ? 100.0 * slack_counts.shortage / tech_slots : 0.0,
     )
     return (total_cost=total_cost, cost_breakdown=cost_breakdown,
             revenue_yuan=revenue_yuan, energy_kwh=energy_kwh,

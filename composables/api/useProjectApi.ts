@@ -38,12 +38,19 @@ export const useProjectApi = () => {
     ) =>
       apiClient.mutate<ProjectDetailResponse>(`/project/${projectId}/boundary`, {
         method: 'PUT',
-        body: { boundaries, ...(fittingModels ? { fittingModels } : {}) }
+        body: {
+          // 大时序只存 boundary.db，不随元数据上传（与 boundary.put 剥离策略对齐）
+          boundaries: boundaries.map(({ rawData: _r, transformedData: _t, ...rest }) => rest),
+          ...(fittingModels ? { fittingModels } : {})
+        }
       }),
     saveLayerConfig: (projectId: string, payload: SaveLayerConfigRequest) =>
       apiClient.mutate<ProjectDetailResponse>(`/project/${projectId}/layer-config`, { method: 'PUT', body: payload }),
-    // [废弃 2026-07-14] 仿真解析已迁移到计算任务系统：POST /api/task/create → run_task 内自动 parse
-    // runSimulationParse: (projectId: string) =>
-    //   apiClient.mutate<{ success: boolean; message: string; outputPath: string }>(`/project/${projectId}/simulation-parse`, { method: 'POST' })
+    /** boundary.db 中已提交数据的边界 ID 列表 */
+    getBoundaryStatus: (projectId: string) =>
+      apiClient.mutate<{ boundaryIds: string[] }>('/boundary/status', {
+        method: 'POST',
+        body: { projectId }
+      }),
   }
 }

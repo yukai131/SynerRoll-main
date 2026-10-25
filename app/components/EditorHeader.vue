@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import brand from '~~/config/brand.json'
 withDefaults(
   defineProps<{
     projectName: string
@@ -9,8 +10,8 @@ withDefaults(
   }>(),
   {
     logoSrc: '/logo.png',
-    logoText: '新能源发电灵活性量化评估软件',
-    userName: 'LYDL'
+    logoText: brand.displayName,
+    userName: brand.publisher
   }
 )
 
@@ -27,7 +28,7 @@ defineEmits<{
 
 <template>
   <header class="bg-primary text-white px-4">
-    <div class="grid h-12 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4">
+    <div class="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 py-2 xl:h-14 xl:grid-cols-[minmax(0,1.3fr)_minmax(80px,0.7fr)_auto] xl:py-0">
       <div class="flex min-w-0 items-center gap-3">
         <button
           type="button"
@@ -46,17 +47,17 @@ defineEmits<{
             alt="软件主标志"
             class="h-9 w-auto max-h-10 shrink-0 object-contain"
           >
-          <span class="inline-flex min-w-0 items-center text-base font-semibold tracking-[0.02em] text-white lg:text-lg">
+          <span :title="logoText" class="inline-flex min-w-0 items-center text-sm font-semibold text-white lg:text-base">
             <span class="truncate">{{ logoText }}</span>
           </span>
         </button>
       </div>
 
-      <div class="min-w-0 text-center">
+      <div class="order-3 col-span-2 min-w-0 text-center xl:order-2 xl:col-span-1">
         <p class="truncate text-base text-white">{{ projectName }}</p>
       </div>
 
-      <div class="flex items-center justify-end gap-1">
+      <div class="order-2 flex items-center justify-end gap-1 xl:order-3">
         <button
           type="button"
           class="inline-flex h-10 w-9 items-center justify-center rounded-[10px] text-white transition hover:bg-white/12"
@@ -92,13 +93,13 @@ defineEmits<{
         <button
           type="button"
           class="inline-flex h-10 items-center gap-2 rounded-[10px] text-sm font-medium text-white transition hover:bg-white/12"
-          title="个人中心"
+          :title="userName ? `${userName} · 个人中心` : '个人中心'"
           @click="$emit('profile')"
         >
           <span class="inline-flex h-8 w-8 items-center justify-center rounded-full bg-white/16">
             <AppIcon name="user" :size="18" />
           </span>
-          <span class="hidden lg:inline">{{ userName }}</span>
+          <span class="hidden 2xl:inline">{{ userName }}</span>
         </button>
       </div>
     </div>

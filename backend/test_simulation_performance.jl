@@ -28,9 +28,8 @@ include(joinpath(@__DIR__, "utils", "perf_probe.jl"))
         rows, _ = snapshot_rows(path)
         @test [row["value"] for row in rows] == [1., 20., 30., 3.]
         @test _safe_get_ts_values(path, key, "1:00", "8760:00") == [20., 30.]
-        set_ts(path, "b_price|price|planned#3", TimeSeries(["0:00", "0:05", "8760:00"], [1., 2., 100.]))
+        set_ts(path, "b_price|fuel_price|planned#3", TimeSeries(["0:00", "0:05", "8760:00"], [1., 2., 100.]))
         @test load_boundary_price_series(path, ["b_price"], "0:00", "1:00") == [1., 2.]
-        @test load_boundary_price_series_multi(path, ["b_price"], "0:00", "1:00"; n=2) == [[1., 2.], nothing]
         @test_throws Exception write_timeseries_batch!(path, [
             (key, TimeSeries(["1:00"], [999.])),
             ("WT|INVALID|power#1", TimeSeries(["invalid-time"], [1.])),

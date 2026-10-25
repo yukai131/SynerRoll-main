@@ -1,5 +1,10 @@
+# 预留预测扩展入口；当前产品使用 None，LSTM 后续实现。
 function predict(predict_ts::TimeSeries, actual_ts::TimeSeries, planned_ts::TimeSeries, ::Val{:LSTM})
-    # TODO: keep the original placeholder until the prediction logic is finalized.
+    error("LSTM 预测尚未实现，请在算法配置中使用 None。")
+end
+
+function predict(predict_ts, actual_ts, planned_ts, ::Val{algorithm}) where {algorithm}
+    error("预测算法 $(algorithm) 尚未实现，请在算法配置中使用 None。")
 end
 
 function resolve_prediction_series(ctx::BuildContext; source_id::String, algorithm_key::String)

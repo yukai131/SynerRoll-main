@@ -236,7 +236,8 @@ function reduce_boundary_scenarios(config::AbstractDict, canvas_id::AbstractStri
     timezone = TimeZone(String(metadata["timezone"]))
 
     # 确定实际使用的边界ID（特征边界）
-    actual_feature_ids = isempty(feature_ids) ? all_boundary_ids : feature_ids
+    # 排序保证同集合不同传入顺序 → 相同矩阵列序 → 相同 scenarioSetHash
+    actual_feature_ids = isempty(feature_ids) ? all_boundary_ids : sort(unique(feature_ids))
     # 跟随边界：画布内边界中不在 feature_ids 中的
     follow_ids = setdiff(all_boundary_ids, actual_feature_ids)
 
@@ -483,7 +484,7 @@ function reduce_boundary_scenarios(config::AbstractDict, canvas_id::AbstractStri
     end
 
     scenario_hash_payload = Dict(
-        "featureIds" => actual_feature_ids,
+        "featureIds" => sort(collect(actual_feature_ids)),
         "clusterCount" => cluster_count,
         "algorithm" => algorithm,
         "normalize" => normalize,

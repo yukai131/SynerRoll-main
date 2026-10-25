@@ -13,7 +13,10 @@ end
 
 function solver_optimizer(solver_name::String)
     solver_name == "HiGHS" && return HiGHS.Optimizer
-    solver_name == "COPT" && return COPT.Optimizer
+    if solver_name == "COPT"
+        require_copt()
+        return COPT.Optimizer
+    end
     
     error("Unsupported solver $(solver_name).")
 end
@@ -64,7 +67,6 @@ function upper_layer_values(ctx::BuildContext, var_name::String, code::String)
     return vals
 end
 
-# 兼容旧签名（model-base.jl 使用）
 upper_layer_values(ctx::BuildContext, var_name::String) = upper_layer_values(ctx, var_name, "")
 
 """

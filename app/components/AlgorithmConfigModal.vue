@@ -85,14 +85,13 @@ const handleCancel = () => {
       <div class="flex items-center justify-between gap-4">
         <div class="min-w-0">
           <div class="text-sm font-medium text-app-text">缺供惩罚</div>
-          <div class="mt-0.5 text-xs text-app-muted">SHORTAGE 系数（元/kWh），默认 1000</div>
         </div>
         <div class="w-52 shrink-0">
           <PropertyNumber
             v-model="localConfig.shortagePenalty"
             :step="100"
             :min="0"
-            unit=""
+            unit="元/kWh"
           />
         </div>
       </div>
@@ -100,14 +99,13 @@ const handleCancel = () => {
       <div class="flex items-center justify-between gap-4">
         <div class="min-w-0">
           <div class="text-sm font-medium text-app-text">过剩惩罚</div>
-          <div class="mt-0.5 text-xs text-app-muted">EXCESS 系数（元/kWh），默认 50</div>
         </div>
         <div class="w-52 shrink-0">
           <PropertyNumber
             v-model="localConfig.excessPenalty"
             :step="10"
             :min="0"
-            unit=""
+            unit="元/kWh"
           />
         </div>
       </div>

@@ -22,8 +22,18 @@ import { useTaskApi } from '~~/composables/api/useTaskApi'
 import { useTaskWebSocket } from '~~/composables/api/useTaskWebSocket'
 import { useProjectApi } from '~~/composables/api/useProjectApi'
 import { useToastCenter } from '~~/state/ui'
-import { parseVariableKey, getVariableDisplayName } from '~~/config/component-meta'
+import {
+  formatResultSeriesTitle,
+  parseResultSeries,
+  parseResultSeriesKey,
+  resultSeriesColorKey,
+  type ResultSeriesMeta,
+} from '~~/config/result-variables'
 import { getResultDisplayUnit } from '~~/utils/result-units'
+import {
+  resolveResultDisplayPreferences,
+  resolveResultPreference,
+} from '~~/utils/result-display-preferences'
 import {
   FLEXIBILITY_REQUIREMENT_LABELS,
   FLEXIBILITY_REQUIREMENT_OPTIONS
@@ -38,15 +48,14 @@ import {
   inclusiveCalendarDayCount,
   isDateOnly
 } from '~~/utils/calendarTime'
-import PropertyText from '../../components/PropertyText.vue'
-import PropertySelect from '../../components/PropertySelect.vue'
+
 import DeviceOutputAnalysis from '~/components/DeviceOutputAnalysis.vue'
 import FlexibilityDemandComparisonModal from '~/components/FlexibilityDemandComparisonModal.vue'
 import PieChart from '~/components/PieChart.vue'
 import ResultChartsSkeleton from '~/components/ResultChartsSkeleton.vue'
 import { getDeviceColor, getLayerColor } from '~~/config/device-colors'
 
-definePageMeta({ title: '结果分析 - SynerRoll' })
+definePageMeta({ title: '结果分析 - 新能源发电系统灵活性量化评估软件' })
 
 function durationToMinutes(duration: string): number | null {
   const match = /^(\d+)(h|m|s)$/.exec(duration.trim())
@@ -114,6 +123,7 @@ const taskSimRange = computed(() => {
 
 // ───── 任务列表弹窗 ─────
 const showTaskListDialog = ref(false)
+const taskListLoading = ref(false)
 
 // ───── 新建任务弹窗 ─────
 const showCreateDialog = ref(false)
@@ -186,41 +196,56 @@ const codeToLabel = computed<Record<string, string>>(() => {
   return result
 })
 
-// ───── 图表显示名称 ─────
-const knownCodes = computed(() => Object.keys(codeToLabel.value))
+// ───── 图表显示名称（闭环目录解析，见 config/result-variables.ts） ─────
+const resultDisplayPrefs = ref(resolveResultDisplayPreferences())
 
 function getChartDisplayUnit(sourceId: string, varName: string, remark?: string): string {
-  const { baseVarName } = parseVariableKey(`${sourceId}|${varName}`, knownCodes.value)
-  return getResultDisplayUnit(baseVarName, remark)
+  const meta = parseResultSeries(sourceId, varName)
+  return getResultDisplayUnit(meta.base, remark)
 }
 
 function getChartDisplayName(key: string): string {
-  const { componentType, baseVarName } = parseVariableKey(key, knownCodes.value)
-  const varDisplayName = getVariableDisplayName(componentType, baseVarName)
-
-  // 从 varName 中匹配 codeToLabel 里已知的 code，获取节点名称
-  const varName = key.split('|')[1] ?? ''
-  let nodeName = ''
-  for (const code of knownCodes.value) {
-    if (varName.includes(code)) {
-      nodeName = codeToLabel.value[code]!
-      break
-    }
-  }
-
-  if (nodeName && varDisplayName !== baseVarName) {
-    return `${nodeName} - ${varDisplayName}`
-  }
-  if (varDisplayName !== baseVarName) {
-    return varDisplayName
-  }
-  return key
+  return formatResultSeriesTitle(parseResultSeriesKey(key), codeToLabel.value)
 }
 
 function getChartDeviceColorKey(key: string): string {
-  const { componentType, baseVarName } = parseVariableKey(key, knownCodes.value)
-  return `${componentType}_${baseVarName}`
+  return resultSeriesColorKey(parseResultSeriesKey(key))
 }
+
+/** 运行总览是否显示边界序列；默认不显示，只显示运行数据 */
+const showBoundaryInOverview = ref(false)
+
+interface OverviewChartEntry {
+  key: string
+  layers: Record<string, { ts: string; value: number }[]>
+  meta: ResultSeriesMeta
+  order: number
+  visible: boolean
+}
+
+const overviewChartEntries = computed<OverviewChartEntry[]>(() => {
+  const prefs = resultDisplayPrefs.value
+  const entries: OverviewChartEntry[] = []
+  for (const [key, layers] of Object.entries(liveData.value)) {
+    const meta = parseResultSeriesKey(key)
+    if (meta.kind === 'boundary' && !showBoundaryInOverview.value) continue
+    const pref = resolveResultPreference(meta.catalogKey, prefs)
+    if (!pref.visible) continue
+    entries.push({ key, layers, meta, order: pref.order, visible: pref.visible })
+  }
+  entries.sort((a, b) =>
+    a.order - b.order
+    || a.meta.label.localeCompare(b.meta.label)
+    || a.meta.base.localeCompare(b.meta.base)
+    || a.meta.code.localeCompare(b.meta.code)
+    || a.key.localeCompare(b.key),
+  )
+  return entries
+})
+
+const overviewBoundaryCount = computed(() =>
+  Object.keys(liveData.value).filter(key => parseResultSeriesKey(key).kind === 'boundary').length,
+)
 
 // ───── 数据轮询 ─────
 let wsHandle: { close: () => void; send: (m: object) => void } | null = null
@@ -1170,7 +1195,15 @@ const taskList = computed(() => {
   return pid ? tasks.filter(t => t.project_id === pid) : tasks
 })
 
-const refreshList = async () => { await refreshTaskList() }
+const refreshList = async () => {
+  taskListLoading.value = true
+  try {
+    await refreshTaskList()
+  }
+  finally {
+    taskListLoading.value = false
+  }
+}
 
 const openTaskList = async () => {
   await refreshList()
@@ -1233,6 +1266,7 @@ type FlexibilityValueMode = 'constant' | 'manual' | 'file' | 'boundary'
 
 interface CreationBoundarySeriesOption {
   value: string
+  boundaryId: string
   label: string
   timestamps: string[]
   values: number[]
@@ -1254,6 +1288,7 @@ const newTask = reactive({
   requirementSource: 'net_load_change' as FlexibilityRequirementSource,
   flexibilityValueMode: 'constant' as FlexibilityValueMode,
   targetPoiPowerKw: 0,
+  targetPoiPowerBoundaryId: '',
   upwardRequirementKw: 0,
   downwardRequirementKw: 0,
   targetPoiPowerSeries: { default: 0 } as Record<string, number>,
@@ -1463,12 +1498,12 @@ const onTimeRangeChange = (value: string) => {
   validateTimeRange(value)
 }
 
-// 画布选项（PropertySelect格式）
+// 画布选项
 const canvasSelectOptions = computed(() =>
   creationCanvasOptions.value.map(c => ({ label: c.name, value: c.id }))
 )
 
-// 时层选项（PropertySelect格式）
+// 时层选项
 const layerSelectOptions = computed(() =>
   creationLayerOptions.value.map(l => ({ label: `${l.name}（${l.step}）`, value: l.id }))
 )
@@ -1505,9 +1540,11 @@ const selectedGridOption = computed(() =>
 
 const isIslandedFlexibility = computed(() => creationGridOptions.value.length === 0)
 
-// 灵活性评价固定采用项目配置中的最底层时层。
+// 单层使用实际求解的目标层，多层使用最底层，评价输入始终来自已求解结果。
 const flexibilityEvaluationLayer = computed(() =>
-  creationLayerOptions.value[creationLayerOptions.value.length - 1]
+  newTask.simMode === 'single_layer'
+    ? creationLayerOptions.value.find(layer => layer.id === newTask.targetLayerId)
+    : creationLayerOptions.value[creationLayerOptions.value.length - 1]
 )
 const flexibilityEvaluationLayerId = computed(() =>
   flexibilityEvaluationLayer.value?.id ?? newTask.layerId
@@ -1589,7 +1626,8 @@ const loadCreationProject = async (projectId: string) => {
 
 const boundarySeriesCandidates = computed(() =>
   (creationProject.value?.boundaries ?? []).filter(boundary =>
-    boundary.meaning === 'power' || /计划|AGC|目标|调度/i.test(boundary.name)
+    boundary.meaning === 'power' &&
+    (boundary.category === 'agc' || /计划|AGC|目标|调度/i.test(boundary.name))
   )
 )
 
@@ -1601,6 +1639,7 @@ const cachedBoundarySeriesOptions = (): CreationBoundarySeriesOption[] => {
     if (!layer?.timestamps.length || layer.timestamps.length !== layer.values.length) continue
     options.push({
       value: `${boundary.id}:${layerId}`,
+      boundaryId: boundary.id,
       label: `${boundary.name} · ${layer.layerName}（项目缓存）`,
       timestamps: layer.timestamps.map(String),
       values: layer.values.map(Number),
@@ -1651,6 +1690,7 @@ const refreshBoundarySeriesOptions = async () => {
       if (!boundary || !boundaryId) continue
       databaseOptions.push({
         value: `${boundaryId}:${layerId}`,
+        boundaryId,
         label: `${boundary.name} · ${creationLayerOptions.value.find(layer => String(layer.id) === String(layerId))?.name ?? `时层${layerId}`}（边界数据库）`,
         timestamps: item.timestamps.map(String),
         values: item.values!.map(Number),
@@ -1688,15 +1728,21 @@ watch(isIslandedFlexibility, (isIslanded) => {
   if (newTask.requirementSource === 'agc_or_schedule') newTask.requirementSource = 'net_load_change'
 })
 
+watch(() => newTask.requirementSource, (source) => {
+  if (source !== 'agc_or_schedule') newTask.targetPoiPowerBoundaryId = ''
+})
+
 watch(
   [() => newTask.flexibilityValueMode, () => flexibilityEvaluationLayerId.value],
   ([mode]) => {
+    newTask.targetPoiPowerBoundaryId = ''
     if (mode === 'boundary') void refreshBoundarySeriesOptions()
   }
 )
 
 watch(showCreateDialog, async (open) => {
   if (open) {
+    newTask.targetPoiPowerBoundaryId = ''
     newTask.projectId = initialProjectId || selectedTask.value?.project_id || newTask.projectId
     newTask.canvasId = initialCanvasId || selectedTask.value?.canvas_id || newTask.canvasId
     newTask.simMode = 'multi_layer'
@@ -1718,6 +1764,14 @@ onMounted(async () => {
   // 如果有 initialProjectId，预加载项目信息（用于返回按钮）
   if (initialProjectId && !currentProject.value) {
     await loadProject(initialProjectId)
+  }
+
+  // 任务列表由后端按 created_at DESC 返回；始终打开最近创建的任务。
+  if (!selectedTaskId.value && taskList.value.length > 0) {
+    const pick = taskList.value[0]
+    if (pick?.id) {
+      await selectTask(pick.id)
+    }
   }
 })
 
@@ -1771,15 +1825,22 @@ const buildFlexibilityTaskConfig = (): FlexibilityTaskConfig => {
   }
 
   if (newTask.requirementSource === 'agc_or_schedule') {
-    if (newTask.flexibilityValueMode !== 'constant' && seriesValidationErrors.target) {
-      throw new Error(seriesValidationErrors.target)
+    if (newTask.flexibilityValueMode === 'boundary') {
+      const boundaryId = newTask.targetPoiPowerBoundaryId.trim()
+      if (!boundaryId) throw new Error('请选择一条AGC目标计划边界曲线')
+      config.targetPoiPowerBoundaryId = boundaryId
     }
-    config.targetPoiPowerKw = parseFlexibilityValueSpec(
-      newTask.targetPoiPowerKw,
-      newTask.targetPoiPowerSeries,
-      '目标并网功率',
-      false
-    )
+    else {
+      if (newTask.flexibilityValueMode !== 'constant' && seriesValidationErrors.target) {
+        throw new Error(seriesValidationErrors.target)
+      }
+      config.targetPoiPowerKw = parseFlexibilityValueSpec(
+        newTask.targetPoiPowerKw,
+        newTask.targetPoiPowerSeries,
+        '目标并网功率',
+        false
+      )
+    }
   }
   else if (newTask.requirementSource === 'user_defined') {
     if (newTask.flexibilityValueMode !== 'constant') {
@@ -1865,18 +1926,18 @@ const createTask = async () => {
       <h1 class="ml-4 text-base font-medium">结果分析</h1>
       <div class="ml-auto flex items-center gap-2">
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-sm font-medium text-white transition hover:bg-white/10"
+          class="inline-flex h-8 items-center rounded-md px-3 text-sm font-medium text-white transition hover:bg-white/10"
           type="button"
           @click="openTaskList"
         >
-          📋 任务列表
+          任务列表
         </button>
         <button
-          class="inline-flex h-8 items-center gap-1.5 rounded-md bg-white/20 px-3 text-sm font-medium text-white transition hover:bg-white/30"
+          class="inline-flex h-8 items-center rounded-md bg-white/20 px-3 text-sm font-medium text-white transition hover:bg-white/30"
           type="button"
           @click="showCreateDialog = true"
         >
-          ➕ 新建任务
+          新建任务
         </button>
       </div>
     </header>
@@ -1906,8 +1967,13 @@ const createTask = async () => {
       <main class="flex-1 panel-card flex flex-col min-h-0 p-3">
         <!-- 未选中任务 -->
         <div v-if="!selectedTask" class="flex-1 flex flex-col items-center justify-center text-app-muted text-sm gap-4">
-          <div>请先选择一个计算任务</div>
-          <AppButton label="选择任务" tone="primary" @click="openTaskList" />
+          <div class="flex h-16 w-16 items-center justify-center rounded-full bg-app-panel-soft text-3xl">📋</div>
+          <div class="text-lg font-medium text-app-text">请先选择或创建一个计算任务</div>
+          <p class="max-w-md text-center text-sm text-app-muted">仿真计算需要基于一个任务进行，任务会保存所有的配置和计算结果。</p>
+          <div class="flex gap-3 mt-2">
+            <AppButton label="选择任务" tone="primary" @click="openTaskList" />
+            <AppButton label="新建任务" tone="neutral" @click="showCreateDialog = true" />
+          </div>
         </div>
 
         <!-- 已选中任务 -->
@@ -1933,39 +1999,53 @@ const createTask = async () => {
               <AppButton
                 v-if="showActions(selectedTask).cancel"
                 label="取消"
-                size="sm"
                 tone="danger"
                 @click="doAction('cancel', selectedTask!.id)"
               />
               <AppButton
                 v-if="showActions(selectedTask).cleanup"
                 label="清理"
-                size="sm"
-                tone="ghost"
+                tone="neutral"
                 @click="doAction('cleanup', selectedTask!.id)"
+              />
+              <AppButton
+                v-if="activeSection === 'overview'"
+                label="显示边界"
+                :tone="showBoundaryInOverview ? 'primary' : 'neutral'"
+                @click="showBoundaryInOverview = !showBoundaryInOverview"
               />
             </div>
           </div>
 
           <!-- 运行总览 -->
-          <div v-if="activeSection === 'overview'" class="flex-1 min-h-0 overflow-y-auto">
+          <div v-if="activeSection === 'overview'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
             <ResultChartsSkeleton
               v-if="Object.keys(liveData).length === 0"
               :status="selectedTask.status"
               :error-message="selectedTask.error_message"
             />
-            <div v-else class="grid grid-cols-2 gap-3">
+            <div
+              v-else-if="overviewChartEntries.length === 0"
+              class="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-app-muted"
+            >
+              <p>当前没有可显示的结果曲线</p>
+              <p v-if="!showBoundaryInOverview && overviewBoundaryCount > 0" class="text-xs">
+                已隐藏 {{ overviewBoundaryCount }} 条边界序列，可点击「显示边界」查看
+              </p>
+            </div>
+            <div v-else class="flex-1 min-h-0 overflow-y-auto">
+            <div class="grid grid-cols-2 gap-3">
               <div
-                v-for="(layers, key) in liveData"
-                :key="key"
+                v-for="entry in overviewChartEntries"
+                :key="entry.key"
                 class="border border-app-border rounded p-2"
               >
                 <TaskSeriesChart
-                  :layers="layers"
-                  :data-version="liveDataVersions[String(key)] ?? 0"
-                  :title="getChartDisplayName(String(key))"
-                  :device-color-key="getChartDeviceColorKey(String(key))"
-                  :unit="liveDataUnits[String(key)] ?? 'kW'"
+                  :layers="entry.layers"
+                  :data-version="liveDataVersions[entry.key] ?? 0"
+                  :title="getChartDisplayName(entry.key)"
+                  :device-color-key="getChartDeviceColorKey(entry.key)"
+                  :unit="liveDataUnits[entry.key] ?? 'kW'"
                   :layer-names="layerNames"
                   :sim-start-time="taskSimRange.start"
                   :sim-end-time="taskSimRange.end"
@@ -1974,6 +2054,7 @@ const createTask = async () => {
                   @update:display-window="updateOverviewDisplayWindow"
                 />
               </div>
+            </div>
             </div>
           </div>
 
@@ -2176,6 +2257,7 @@ const createTask = async () => {
                   >
                     <EnergyFlowChart
                       :bus-label="`${bus.busLabel} · ${layer.label}`"
+                      :bus-code="bus.busCode"
                       :variables="bus.variables"
                       :live-data="liveData"
                       :layer-id="layer.value"
@@ -2319,13 +2401,15 @@ const createTask = async () => {
                 :key="layer.layerId"
                 class="border border-app-border bg-white p-4 space-y-4"
               >
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
                   <!-- 左半区：扇形图 + 不平衡提醒 -->
-                  <div class="space-y-3">
-                    <div v-if="economyLayerPieItems[layer.layerId]?.length > 0">
-                      <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                        <h3 class="text-sm font-semibold text-app-text">{{ layer.layerName }} · 目标函数组成</h3>
-                        <div class="text-sm text-app-muted">
+                  <div class="flex min-w-0 flex-col items-start justify-start gap-5">
+                    <div v-if="economyLayerPieItems[layer.layerId]?.length > 0" class="flex w-full flex-col items-start">
+                      <div class="mb-3 w-full space-y-2">
+                        <h3 class="bg-app-panel-soft px-3 py-2 text-left text-base font-semibold text-app-text">
+                          {{ layer.layerName }} · 目标函数组成
+                        </h3>
+                        <div class="text-right text-sm text-app-muted">
                           目标函数值（不含松弛惩罚）：
                           <span class="font-semibold text-app-text">{{ formatMoney(layer.objectiveValue) }}</span>
                         </div>
@@ -2333,6 +2417,7 @@ const createTask = async () => {
                       <PieChart
                         :items="economyLayerPieItems[layer.layerId]"
                         unit="元"
+                        size="lg"
                       />
                     </div>
                     <div v-else class="text-sm text-app-muted">
@@ -2340,7 +2425,7 @@ const createTask = async () => {
                     </div>
 
                     <!-- 松弛变量警告：放在扇形图下方 -->
-                    <div v-if="layer.hasSlack" class="border border-orange-300 bg-orange-50 p-3">
+                    <div v-if="layer.hasSlack" class="w-full max-w-md border border-orange-300 bg-orange-50 p-3">
                       <div class="flex items-center gap-2 text-orange-700 font-semibold text-sm mb-1">
                         ⚠️ 存在能量不平衡
                       </div>
@@ -2519,8 +2604,11 @@ const createTask = async () => {
     >
       <div class="px-2 py-1">
         <div class="max-h-96 overflow-y-auto">
-          <div v-if="taskList.length === 0" class="p-4 text-center text-sm text-app-muted">
-            暂无任务
+          <div v-if="taskListLoading" class="p-4 text-center text-sm text-app-muted">
+            加载中...
+          </div>
+          <div v-else-if="taskList.length === 0" class="p-4 text-center text-sm text-app-muted">
+            暂无计算任务
           </div>
           <table v-else class="w-full text-sm">
             <thead>
@@ -2537,9 +2625,10 @@ const createTask = async () => {
                 v-for="t in taskList"
                 :key="t.id"
                 class="border-b border-app-border cursor-pointer hover:bg-app-panel-soft"
+                :class="selectedTaskId === t.id ? 'bg-primary-soft' : ''"
                 @click="selectTask(t.id)"
               >
-                <td class="py-2 pr-4 truncate max-w-[10rem]">{{ t.name ?? t.id.slice(0, 8) }}</td>
+                <td class="py-2 pr-4 truncate max-w-[12rem]">{{ t.name ?? t.id.slice(0, 8) }}</td>
                 <td class="py-2 pr-4 font-mono text-xs text-app-muted truncate max-w-[8rem]">{{ t.project_id }}</td>
                 <td class="py-2 pr-4">{{ t.mode === 'offline' ? '离线' : '在线' }}</td>
                 <td class="py-2 pr-4">
@@ -2587,7 +2676,7 @@ const createTask = async () => {
       <div class="space-y-4 px-2 py-1">
         <section class="p-2">
           <div class="mb-3">
-            <h3 class="text-base text-app-text">仿真任务设置</h3>
+            <h3 class="text-base text-app-text">任务设置</h3>
           </div>
 
           <div class="space-y-4 border-t border-app-border pt-4">
@@ -2595,27 +2684,34 @@ const createTask = async () => {
             <div class="property-row-double">
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">项目名称</label>
-                <PropertyText
-                  :model-value="creationProjectName"
-                  placeholder=""
-                  :disabled="true"
+                <input
+                  type="text"
+                  :value="creationProjectName"
+                  disabled
+                  class="flex-1 rounded-md border border-app-border bg-app-panel-soft px-3 py-2 text-sm text-app-muted"
                 />
               </div>
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">建模画布</label>
-                <PropertySelect
+                <select
                   v-model="newTask.canvasId"
-                  :options="canvasSelectOptions"
-                />
+                  class="flex-1 rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option v-for="opt in canvasSelectOptions" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
+                </select>
               </div>
             </div>
             <!-- 任务名称 -->
             <div class="property-row-double">
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">任务名称</label>
-                <PropertyText
+                <input
                   v-model="newTask.name"
+                  type="text"
                   :placeholder="defaultTaskName"
+                  class="flex-1 rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
             </div>
@@ -2623,20 +2719,23 @@ const createTask = async () => {
             <div class="property-row-double">
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">运行方式</label>
-                <PropertyText
-                  model-value="离线计算"
-                  placeholder=""
-                  :disabled="true"
+                <input
+                  type="text"
+                  value="离线计算"
+                  disabled
+                  class="flex-1 rounded-md border border-app-border bg-app-panel-soft px-3 py-2 text-sm text-app-muted"
                 />
               </div>
               <div v-if="creationTimeMode !== 'calendar'" class="flex items-center gap-2 flex-1">
                 <label class="property-label">时间范围</label>
                 <div class="flex-1">
-                  <PropertyText
-                    :model-value="timeRange"
+                  <input
+                    type="text"
+                    :value="timeRange"
                     placeholder="0:00-24:00"
                     :disabled="creationTimeMode === 'invalid'"
-                    @update:model-value="onTimeRangeChange"
+                    class="w-full rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-app-panel-soft disabled:text-app-muted"
+                    @input="onTimeRangeChange(($event.target as HTMLInputElement).value)"
                   />
                   <p v-if="timeRangeError" class="text-xs text-red-500 mt-1">{{ timeRangeError }}</p>
                   <p v-if="creationTimeMode === 'invalid'" class="mt-1 text-xs text-app-danger">
@@ -2699,11 +2798,15 @@ const createTask = async () => {
                   单层仿真
                 </button>
               </div>
-              <PropertySelect
+              <select
                 v-model="newTask.targetLayerId"
-                :options="layerSelectOptions"
                 :disabled="newTask.simMode === 'multi_layer'"
-              />
+                class="flex-1 rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-app-panel-soft disabled:text-app-muted"
+              >
+                <option v-for="opt in layerSelectOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
             </div>
           </div>
 
@@ -2720,18 +2823,30 @@ const createTask = async () => {
             <div class="property-row-double">
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">需求来源</label>
-                <PropertySelect
+                <select
                   v-model="newTask.requirementSource"
-                  :options="availableRequirementOptions.map(o => ({ value: o.value, label: o.label }))"
-                />
+                  class="flex-1 rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option v-for="opt in availableRequirementOptions" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
+                </select>
               </div>
               <div class="flex items-center gap-2 flex-1">
                 <label class="property-label">并网点</label>
-                <PropertySelect
+                <select
                   v-model="newTask.poiId"
-                  :options="isIslandedFlexibility ? [{ value: '', label: '无并网点' }] : creationGridOptions.map(o => ({ value: o.value, label: o.label }))"
                   :disabled="isIslandedFlexibility"
-                />
+                  class="flex-1 rounded-md border border-app-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:bg-app-panel-soft disabled:text-app-muted"
+                >
+                  <option
+                    v-for="opt in (isIslandedFlexibility ? [{ value: '', label: '无并网点' }] : creationGridOptions)"
+                    :key="opt.value"
+                    :value="opt.value"
+                  >
+                    {{ opt.label }}
+                  </option>
+                </select>
               </div>
             </div>
             
@@ -2805,11 +2920,13 @@ const createTask = async () => {
                 </label>
                 <FlexibilityTimeSeriesEditor
                   v-if="newTask.flexibilityValueMode !== 'constant'"
+                  :key="`agc-${newTask.flexibilityValueMode}-${flexibilityEvaluationLayerId}`"
                   v-model="newTask.targetPoiPowerSeries"
                   :mode="newTask.flexibilityValueMode"
                   label="目标并网功率"
                   :boundary-options="boundarySeriesOptions"
                   :expected-timestamps="expectedRequirementTimestamps"
+                  @update:boundary-id="newTask.targetPoiPowerBoundaryId = $event"
                   @validation="seriesValidationErrors.target = $event"
                 />
               </div>
@@ -2852,19 +2969,8 @@ const createTask = async () => {
         </section>
       </div>
       <template #footer>
-        <AppButton
-          label="取消"
-          tone="neutral"
-          :disabled="creatingTask"
-          @click="showCreateDialog = false"
-        />
-        <AppButton
-          label="创建"
-          tone="primary"
-          :loading="creatingTask"
-          loading-label="创建中..."
-          @click="createTask"
-        />
+        <AppButton label="取消" tone="neutral" @click="showCreateDialog = false" />
+        <AppButton label="创建" tone="primary" :disabled="creatingTask" @click="createTask" />
       </template>
     </AppModal>
   </div>

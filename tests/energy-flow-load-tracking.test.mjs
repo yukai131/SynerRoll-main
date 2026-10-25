@@ -16,7 +16,15 @@ function chartFixture(props) {
   let option
   const cache = new Map()
   const scope = vue.effectScope()
-  const chart = { setOption(value) { option = value }, resize() {}, dispose() {} }
+  const chart = {
+    setOption(value) { option = value },
+    resize() {},
+    dispose() {},
+    off() {},
+    on() {},
+    getOption() { return option },
+    dispatchAction() {},
+  }
   function load(filename) {
     if (cache.has(filename)) return cache.get(filename)
     let source = readFileSync(filename, 'utf8')
@@ -47,6 +55,7 @@ function chartFixture(props) {
   state.chartRef.value = {}
   return {
     render() { state.renderChart(); return option },
+    metrics() { return vue.unref(state.energyMetrics) },
     close() { scope.stop() },
   }
 }
@@ -105,6 +114,28 @@ test('a bus without a recognized load retains all sinks in tracking mode', () =>
     assert.equal(option.series.length, 1)
     assert.equal(option.series[0].type, 'bar')
     assert.deepEqual(Array.from(option.series[0].data), [-9])
+  }
+  finally { fixture.close() }
+})
+
+test('stability subtracts shortage and excess shares from 100 independently', () => {
+  const points = values => values.map(([ts, value]) => ({ ts, value }))
+  const fixture = chartFixture({
+    busLabel: '电总线', busCode: 'bus', layerId: '1', displayMode: 'balance', timeStepMinutes: 60,
+    variables: ['E_PV_out_src', 'E_ELOAD_in_load'],
+    codeToLabel: { src: '光伏', load: '电负荷' },
+    liveData: {
+      'PV|E_PV_src': { '1': points([['0:00', 100]]) },
+      'ELOAD|E_ELOAD_load': { '1': points([['0:00', 200]]) },
+      'BUS|E_SHORTAGE_bus': { '1': points([['0:00', 1]]) },
+      'BUS|E_EXCESS_bus': { '1': points([['0:00', 4]]) },
+    },
+    displayWindow: { dateStart: 0, dateEnd: 60, start: 0, end: 60 },
+  })
+  try {
+    const stability = fixture.metrics().find(item => item.key === 'stability')
+    assert.equal(stability.value, '99.00 / 98.00')
+    assert.deepEqual(Array.from(stability.segments, segment => segment.text), ['99.00', '/', '98.00'])
   }
   finally { fixture.close() }
 })

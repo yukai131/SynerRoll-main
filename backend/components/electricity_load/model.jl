@@ -5,7 +5,6 @@
 #   - 使用 JuMP 直接 API + CodeTracer 构建模型并记录代码
 #   - 返回 (objective_expr, code_lines::Vector{String})
 #   - 所有参数在代码追踪中内联为硬值
-#   - 原始数学原理见 model-base.jl
 # ═══════════════════════════════════════════════════════════════════════════
 
 function build_component_model!(model, component::ElectricityLoad, ctx::BuildContext, tracer::CodeTracer)

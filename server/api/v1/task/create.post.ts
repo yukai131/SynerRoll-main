@@ -1,4 +1,4 @@
-import { apiSuccess } from '#server/utils/response'
+import { apiSuccess, throwBackendBizError, rethrowAsApiError } from '#server/utils/response'
 import { JULIA } from '#server/utils/julia'
 import { readProjectById } from '#server/utils/project-store'
 
@@ -16,10 +16,6 @@ export default defineEventHandler(async (event) => {
 
   // 从项目存储读取完整项目数据（含画布、时层配置等）
   const project = await readProjectById(body.projectId)
-  const projectJsonStr = JSON.stringify(project)
-  const boundaryJsonStr = JSON.stringify(project.boundaries ?? [])
-  // console.log(`[TASK-CREATE] project JSON: ${(projectJsonStr.length / 1024).toFixed(1)} KB, boundaries: ${(boundaryJsonStr.length / 1024).toFixed(1)} KB`)
-
   try {
     const response = await $fetch<{
       success: boolean
@@ -36,18 +32,9 @@ export default defineEventHandler(async (event) => {
     if (response.success) {
       return apiSuccess(response.data ?? {}, response.message)
     }
-    else {
-      throw createError({
-        statusCode: 400,
-        message: response.message || '创建任务失败'
-      })
-    }
+    throwBackendBizError(response.message, '创建任务失败')
   }
   catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error'
-    throw createError({
-      statusCode: 500,
-      message: `Julia backend error: ${message}`
-    })
+    rethrowAsApiError(error, '创建任务失败')
   }
 })

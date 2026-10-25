@@ -1,5 +1,4 @@
 using BlackBoxOptim
-using COPT
 using JSON3
 using Random
 using SHA
@@ -8,6 +7,11 @@ const CAPACITY_OPTIMIZER_METHODS = Set([
     "adaptive_de_rand_1_bin_radiuslimited",
     "adaptive_de_rand_1_bin",
     "separable_nes",
+    "dxnes",
+    "xnes",
+    "generating_set_search",
+    "probabilistic_descent",
+    "random_search",
 ])
 const CAPACITY_EVALUATOR_VERSION = "simulation-evaluator-v1"
 const PLANNING_OPTIMIZER_LOCK = ReentrantLock()
@@ -48,6 +52,68 @@ function _failure_fitness(base::Float64, best_fitness::Float64)::Float64
         return max(base, abs(best_fitness) * 10.0 + base)
     end
     return base
+end
+
+"""进度用最优 breakdown 摘要：只保留前端展示所需字段，避免 progress 膨胀。"""
+function _best_breakdown_summary(breakdown::Union{Nothing,AbstractDict})
+    breakdown === nothing && return nothing
+    tech_metrics = get(breakdown, "technicalMetrics", nothing)
+    tech_details = get(breakdown, "technicalConstraintDetails", nothing)
+    objective = get(breakdown, "objectiveFitness", nothing)
+    weighted = get(breakdown, "weightedOperatingCost", objective)
+    ind = get(breakdown, "indicators", nothing)
+    return Dict{String,Any}(
+        "objectiveFitness" => objective,
+        "weightedOperatingCost" => weighted,
+        "constraintPenalty" => get(breakdown, "constraintPenalty", nothing),
+        "constraintPenaltyInObjectiveUnit" => get(breakdown, "constraintPenaltyInObjectiveUnit", nothing),
+        "technicalConstraintPenalty" => get(breakdown, "technicalConstraintPenalty", nothing),
+        "fitnessPenaltyMode" => get(breakdown, "fitnessPenaltyMode", nothing),
+        "technicalMetrics" => tech_metrics isa AbstractDict ? Dict{String,Any}(tech_metrics) : nothing,
+        "technicalConstraintDetails" => tech_details isa AbstractVector ? collect(tech_details) : nothing,
+        "indicators" => ind isa AbstractDict ? Dict{String,Any}(ind) : nothing,
+    )
+end
+
+"""收敛曲线/指标卡用的单次评价指标摘要（含技术指标与惩罚标记）。"""
+function _evaluation_chart_metrics(breakdown::AbstractDict, feasible::Bool, fitness=nothing)
+    tech = get(breakdown, "technicalMetrics", nothing)
+    tech_dict = tech isa AbstractDict ? tech : Dict{String,Any}()
+    details = get(breakdown, "technicalConstraintDetails", nothing)
+    has_tech_penalty = false
+    if details isa AbstractVector
+        for item in details
+            item isa AbstractDict || continue
+            penalty = get(item, "penalty", 0.0)
+            (penalty isa Real && penalty > 0) && (has_tech_penalty = true)
+        end
+    end
+    technical_penalty = get(breakdown, "technicalConstraintPenalty", 0.0)
+    constraint_penalty = get(breakdown, "constraintPenalty", 0.0)
+    indicators = get(breakdown, "indicators", nothing)
+    ind = indicators isa AbstractDict ? indicators : Dict{String,Any}()
+    num(key) = begin
+        v = get(tech_dict, key, nothing)
+        v isa Real ? Float64(v) : nothing
+    end
+    return Dict{String,Any}(
+        "feasible" => feasible,
+        "fitness" => fitness isa Real && isfinite(fitness) ? Float64(fitness) : nothing,
+        "hasPenalty" => feasible && (has_tech_penalty || (constraint_penalty isa Real && constraint_penalty > 0)),
+        "renewableConsumptionRate" => num("renewableConsumptionRate"),
+        "greenPowerShare" => num("greenPowerShare"),
+        "purchasedPowerShare" => num("purchasedPowerShare"),
+        "stability" => num("stability"),
+        "stabilityExcessShare" => num("stabilityExcessShare"),
+        "stabilityShortageShare" => num("stabilityShortageShare"),
+        "objectiveFitness" => get(breakdown, "objectiveFitness", nothing),
+        "weightedOperatingCost" => get(breakdown, "weightedOperatingCost", nothing),
+        "lifecycleCapexWan" => get(breakdown, "lifecycleCapexWan", nothing),
+        "irr" => get(ind, "irr", nothing),
+        "lcoe" => get(ind, "lcoe", nothing),
+        "npv" => get(ind, "npv", nothing),
+        "constraintPenalty" => constraint_penalty,
+    )
 end
 
 function _quantize_candidate(values, variables)
@@ -246,6 +312,7 @@ function _planning_cancelled(ctx)
     if isready(ctx.signal_ch) && take!(ctx.signal_ch) == :cancel
         ctx.cancel_requested[] = true
     end
+    ctx.cancel_requested[] || planning_remaining_seconds()
     return ctx.cancel_requested[]
 end
 
@@ -253,7 +320,8 @@ function _planning_phase_progress!(planning_id, phase, started_ns; kwargs...)
     task = get_planning_task(planning_id)
     progress = task === nothing ? Dict{String,Any}() : task["progress"]
     progress["phase"] = phase
-    progress["elapsedMs"] = round(Int, (time_ns() - started_ns) / 1_000_000)
+    progress["elapsedMs"] = round(Int, planning_elapsed_seconds() * 1000)
+    progress["wallElapsedMs"] = round(Int, (time_ns() - started_ns) / 1_000_000)
     for (key, value) in kwargs
         progress[string(key)] = value
     end
@@ -295,8 +363,13 @@ function complete_planning_from_evaluations!(planning_id::String; stop_reason::U
     running_best = Inf
     for item in evaluations
         item["feasible"] && (running_best = min(running_best, Float64(item["fitness"])))
-        push!(history, Dict("ordinal"=>item["ordinal"], "fitness"=>item["fitness"],
-            "feasible"=>item["feasible"], "bestSoFar"=>isfinite(running_best) ? running_best : nothing))
+        item_breakdown = item["breakdown"]
+        item_bd = item_breakdown isa AbstractDict ? item_breakdown : Dict{String,Any}()
+        push!(history, Dict(
+            "ordinal"=>item["ordinal"], "fitness"=>item["fitness"],
+            "feasible"=>item["feasible"], "bestSoFar"=>isfinite(running_best) ? running_best : nothing,
+            "metrics"=>_evaluation_chart_metrics(item_bd, Bool(item["feasible"]), item["fitness"]),
+        ))
     end
     warnings = String.(get(best["breakdown"], "warnings", String[]))
     stop_reason !== nothing && push!(warnings, stop_reason)
@@ -319,6 +392,7 @@ function complete_planning_from_evaluations!(planning_id::String; stop_reason::U
     merge!(progress, Dict("phase"=>"completed", "completedEvaluations"=>length(evaluations),
         "failedEvaluations"=>result["failedEvaluationCount"], "bestFitness"=>best["fitness"],
         "bestCandidate"=>best["candidate"], "convergence"=>history, "cancellationRequested"=>false,
+        "bestBreakdown"=>_best_breakdown_summary(best["breakdown"]),
         "currentScenario"=>nothing, "stopReason"=>stop_reason))
     update_planning_progress!(planning_id, progress)
     set_planning_status!(planning_id, "completed")
@@ -327,6 +401,19 @@ end
 
 """运行一个已冻结的规划任务。调用方负责捕获异常并更新终态。"""
 function run_capacity_optimization!(planning_id::String, ctx)
+    lock(PLANNING_OPTIMIZER_LOCK) do
+        task = get_planning_task(planning_id)
+        task === nothing && error("规划任务不存在: $(planning_id)")
+        start_planning_budget!(Float64(get(task["config"]["optimizer"], "maxTimeSeconds", 86400.0)))
+        try
+            return _run_capacity_optimization!(planning_id, ctx)
+        finally
+            finish_planning_budget!()
+        end
+    end
+end
+
+function _run_capacity_optimization!(planning_id::String, ctx)
     lock(PLANNING_OPTIMIZER_LOCK) do
         started_ns = time_ns()
         task = get_planning_task(planning_id)
@@ -381,6 +468,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
         try
             solver_name = get_solver_name(Dict{String,Any}(get(snapshot, "algorithm", Dict())))
             if solver_name == "COPT"
+                require_copt()
                 copt_env = COPT.Env()
                 optimizer_factory = () -> COPT.Optimizer(copt_env)
             else
@@ -509,7 +597,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                         error_message = simulation.error_message
                     end
                 catch error
-                    error isa PlanningCancelled && rethrow()
+                    (error isa PlanningCancelled || error isa PlanningTimeLimit) && rethrow()
                     error_code = error isa CapacityPlanningError ? error.code : "EVALUATION_ERROR"
                     error_message = error isa CapacityPlanningError ? error.message : sprint(showerror, error)
                 end
@@ -570,6 +658,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     "fitness" => evaluation_fitness,
                     "feasible" => feasible,
                     "bestSoFar" => isfinite(best_fitness[]) ? best_fitness[] : nothing,
+                    "metrics" => _evaluation_chart_metrics(breakdown, feasible, evaluation_fitness),
                 ))
 
                 progress = _planning_phase_progress!(
@@ -579,6 +668,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     failedEvaluations=failed[],
                     bestFitness=isfinite(best_fitness[]) ? best_fitness[] : nothing,
                     bestCandidate=best_candidate[],
+                    bestBreakdown=_best_breakdown_summary(best_breakdown[]),
                     convergence=live_history,
                     currentScenario=nothing,
                 )
@@ -594,7 +684,17 @@ function run_capacity_optimization!(planning_id::String, ctx)
 
             remaining = max_evaluations - completed[]
             if remaining > 0
-                Random.seed!(Int(optimizer["seed"]))
+                # 随机种子对业务无意义：缺省/非正数时自动生成，保证可复现但不由用户填写
+                seed_value = try
+                    Int(optimizer["seed"])
+                catch
+                    0
+                end
+                if seed_value <= 0
+                    seed_value = Int(time_ns() % 2_147_483_647)
+                    optimizer["seed"] = seed_value
+                end
+                Random.seed!(seed_value)
                 method = Symbol(string(optimizer["method"]))
                 kwargs = Dict{Symbol,Any}(
                     :SearchRange => search_range,
@@ -604,8 +704,7 @@ function run_capacity_optimization!(planning_id::String, ctx)
                     :PopulationSize => Int(optimizer["populationSize"]),
                     :TraceMode => :silent,
                 )
-                max_time = get(optimizer, "maxTimeSeconds", nothing)
-                max_time !== nothing && (kwargs[:MaxTime] = Float64(max_time))
+                # bboptimize 的墙钟会包含 JIT；统一由排除编译的预算时钟控制。
                 perf_measure("planning", planning_id, "bboptimize"; meta=Dict{String,Any}(
                     "maxFuncEvals" => max_evaluations,
                     "populationSize" => Int(optimizer["populationSize"]),

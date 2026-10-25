@@ -1,398 +1,226 @@
-/**
- * SynerRoll Electron 主进程
- * 职责：读配置 → 拉起 Julia + Nuxt BFF → 健康检查 → 开窗 → 托盘 → 优雅退出
- */
-const { app, BrowserWindow, Tray, Menu, dialog, shell } = require('electron')
-const { spawn } = require('child_process')
-const path = require('path')
-const fs = require('fs')
-const http = require('http')
-const net = require('net')
-
-// ── 路径 ──────────────────────────────────────────────
-const ROOT = path.resolve(__dirname)
-const CONFIG_PATH = path.join(ROOT, 'config', 'synerroll.json')
-const RUNTIME_DIR = path.join(ROOT, 'runtime')
-const APP_DIR = path.join(ROOT, 'app')
-
-// ── 配置 ──────────────────────────────────────────────
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron')
+const { spawn } = require('node:child_process')
+const { pathToFileURL } = require('node:url')
+const { verifyLicenseKey } = require('./license.cjs')
+const path = require('node:path')
+const fs = require('node:fs')
+const http = require('node:http')
+const net = require('node:net')
+const resources = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '../release-stage')
+const payload = path.join(resources, 'app')
+const runtime = path.join(resources, 'runtime')
+const brand = JSON.parse(fs.readFileSync(path.join(resources, 'config/brand.json'), 'utf8'))
+app.setName(brand.productName)
+const configuredUserRoot = process.env.SYNERROLL_USER_DATA
+  ? path.resolve(process.env.SYNERROLL_USER_DATA)
+  : path.join(app.getPath('appData'), brand.productName)
+fs.mkdirSync(configuredUserRoot, { recursive: true })
+app.setPath('userData', configuredUserRoot)
+const userRoot = app.getPath('userData')
+const dataDir = path.join(userRoot, 'data')
+const logDir = path.join(userRoot, 'logs')
+const configPath = path.join(userRoot, 'settings.json')
+for (const dir of [dataDir, logDir, path.join(userRoot, 'julia-depot')]) fs.mkdirSync(dir, { recursive: true })
+function log(name, message) {
+  fs.appendFileSync(path.join(logDir, name), `[${new Date().toISOString()}] ${message}\n`)
+}
 function loadConfig() {
-  const defaults = {
-    version: 1,
-    juliaPort: 8080,
-    bffPort: 3000,
-    host: '127.0.0.1',
-    solver: 'HiGHS',
-    dataDir: 'data',
-    logDir: 'logs',
-    julia: { heapSizeHintMB: 0, startupTimeoutSec: 120 },
-    bff: { startupTimeoutSec: 60 },
-    ui: { openDevTools: false, windowWidth: 1440, windowHeight: 900 }
-  }
-  try {
-    const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'))
-    return {
-      ...defaults,
-      ...raw,
-      julia: { ...defaults.julia, ...(raw.julia || {}) },
-      bff: { ...defaults.bff, ...(raw.bff || {}) },
-      ui: { ...defaults.ui, ...(raw.ui || {}) }
+  const defaults = JSON.parse(fs.readFileSync(path.join(resources, 'config/synerroll.json'), 'utf8'))
+  if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, JSON.stringify(defaults, null, 2))
+  const saved = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''))
+  return { ...defaults, ...saved, julia: { ...defaults.julia, ...saved.julia }, bff: { ...defaults.bff, ...saved.bff }, ui: { ...defaults.ui, ...saved.ui } }
+}
+let mainWindow, splash, licenseWindow, config
+let authenticated = false
+let booting = false
+let stopping = false
+const children = new Set()
+let startup = 0
+const displayName = brand.displayName || brand.productName
+const shellPage = name => path.join(__dirname, 'ui', name)
+function trustedShell(event) {
+  return [licenseWindow, splash].some(window => window && !window.isDestroyed()
+    && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame
+    && ['license.html', 'startup.html'].some(name => event.senderFrame.url === pathToFileURL(shellPage(name)).href))
+}
+function configureWindow(window, fullscreen = false) {
+  window.setMenu(null)
+  window.setMenuBarVisibility(false)
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    if (input.key === 'F11') {
+      event.preventDefault()
+      if (fullscreen) window.setFullScreen(!window.isFullScreen())
     }
-  } catch {
-    return defaults
-  }
-}
-
-const config = loadConfig()
-const dataDir = path.isAbsolute(config.dataDir) ? config.dataDir : path.join(ROOT, config.dataDir)
-const logDir = path.isAbsolute(config.logDir) ? config.logDir : path.join(ROOT, config.logDir)
-
-// ── 日志 ──────────────────────────────────────────────
-function ensureDirs() {
-  for (const d of [
-    dataDir,
-    logDir,
-    path.join(dataDir, 'projects'),
-    path.join(dataDir, 'tasks'),
-    path.join(dataDir, 'licenses')
-  ]) {
-    try { fs.mkdirSync(d, { recursive: true }) } catch { /* ignore */ }
-  }
-}
-
-function appendLog(name, line) {
-  try {
-    fs.appendFileSync(
-      path.join(logDir, name),
-      `[${new Date().toISOString()}] ${line}\n`
-    )
-  } catch (e) {
-    console.error('[LOGFAIL]', name, e.message)
-  }
-}
-
-// ── 端口 ──────────────────────────────────────────────
-function isPortFree(port, host = '127.0.0.1') {
-  return new Promise((resolve) => {
-    const srv = net.createServer()
-    srv.once('error', () => resolve(false))
-    srv.once('listening', () => { srv.close(); resolve(true) })
-    srv.listen(port, host)
-  })
-}
-
-async function pickPort(preferred, host) {
-  for (let p = preferred; p < preferred + 20; p++) {
-    if (await isPortFree(p, host)) return p
-  }
-  throw new Error(`端口 ${preferred}–${preferred + 19} 均被占用`)
-}
-
-// ── 健康检查 ──────────────────────────────────────────
-function httpGet(url, timeoutMs = 3000) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, { timeout: timeoutMs }, (res) => {
-      let body = ''
-      res.on('data', (c) => (body += c))
-      res.on('end', () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(body) }) }
-        catch { resolve({ status: res.statusCode, body }) }
-      })
-    })
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
-    req.on('error', reject)
-  })
-}
-
-async function waitForHealth(url, timeoutSec, label, onTick) {
-  const deadline = Date.now() + timeoutSec * 1000
-  let attempt = 0
-  while (Date.now() < deadline) {
-    attempt++
-    try {
-      const r = await httpGet(url, 3000)
-      if (r.status === 200 && (r.body?.status === 'ok' || r.body?.data?.ready === true || r.body?.success === true)) {
-        return r.body
-      }
-    } catch { /* not ready */ }
-    if (onTick) onTick(attempt, Math.ceil((deadline - Date.now()) / 1000))
-    await new Promise((r) => setTimeout(r, 1500))
-  }
-  throw new Error(`${label} 在 ${timeoutSec}s 内未就绪: ${url}`)
-}
-
-// ── 子进程 ────────────────────────────────────────────
-let juliaProc = null
-let bffProc = null
-
-function startJulia(port) {
-  const juliaExe = path.join(RUNTIME_DIR, 'julia', 'bin', 'julia.exe')
-  const backendDir = path.join(APP_DIR, 'backend')
-  const depot = path.join(RUNTIME_DIR, 'julia-depot')
-  const serverScript = path.join(backendDir, 'server.jl')
-
-  const env = {
-    ...process.env,
-    PORT: String(port),
-    JULIA_DEPOT_PATH: depot,
-    JULIA_PROJECT: backendDir,
-    SYNERROLL_DATA_DIR: dataDir,
-    SYNERROLL_DEFAULT_SOLVER: config.solver
-  }
-  if (config.julia.heapSizeHintMB > 0) {
-    env.JULIA_HEAP_SIZE_HINT = `${config.julia.heapSizeHintMB}M`
-  }
-
-  appendLog('launcher.log', `starting Julia: ${juliaExe} --project=${backendDir}`)
-  juliaProc = spawn(juliaExe, [`--project=${backendDir}`, serverScript], {
-    env,
-    cwd: backendDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true
-  })
-  juliaProc.stdout.on('data', (d) => appendLog('julia.log', d.toString().trimEnd()))
-  juliaProc.stderr.on('data', (d) => appendLog('julia.log', d.toString().trimEnd()))
-  juliaProc.on('exit', (code, signal) => {
-    appendLog('launcher.log', `Julia exited code=${code} signal=${signal}`)
-    juliaProc = null
-  })
-  return juliaProc
-}
-
-function startBff(juliaPort, bffPort) {
-  const entry = path.join(APP_DIR, '.output', 'server', 'index.mjs')
-  const env = {
-    ...process.env,
-    PORT: String(bffPort),
-    NITRO_PORT: String(bffPort),
-    HOST: config.host,
-    NITRO_HOST: config.host,
-    JULIA_BACKEND_URL: `http://${config.host}:${juliaPort}`,
-    NUXT_PUBLIC_JULIA_WS_BASE: `ws://${config.host}:${juliaPort}`,
-    NUXT_PUBLIC_API_BASE: '/api/v1'
-  }
-
-  appendLog('launcher.log', `starting BFF: node ${entry} (port ${bffPort})`)
-  bffProc = spawn(process.execPath, [entry], {
-    env,
-    cwd: APP_DIR,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true
-  })
-  bffProc.stdout.on('data', (d) => appendLog('bff.log', d.toString().trimEnd()))
-  bffProc.stderr.on('data', (d) => appendLog('bff.log', d.toString().trimEnd()))
-  bffProc.on('exit', (code, signal) => {
-    appendLog('launcher.log', `BFF exited code=${code} signal=${signal}`)
-    bffProc = null
-  })
-  return bffProc
-}
-
-function stopChildren() {
-  for (const p of [juliaProc, bffProc]) {
-    if (p && !p.killed) {
-      try { p.kill('SIGTERM') } catch { /* ignore */ }
+    if (input.key === 'Escape' && window.isFullScreen()) {
+      event.preventDefault()
+      window.setFullScreen(false)
     }
-  }
-  juliaProc = null
-  bffProc = null
-}
-
-// ── 窗口 / 托盘 ───────────────────────────────────────
-let mainWindow = null
-let tray = null
-let splash = null
-
-function createSplash() {
-  splash = new BrowserWindow({
-    width: 480,
-    height: 280,
-    frame: false,
-    resizable: false,
-    alwaysOnTop: true,
-    webPreferences: { nodeIntegration: false }
+    if (input.key === 'F12' || ((input.control || input.meta) && input.shift && ['i', 'j', 'c'].includes(input.key.toLowerCase()))) event.preventDefault()
   })
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    body{margin:0;font-family:'Segoe UI',system-ui,sans-serif;background:#0f172a;color:#e2e8f0;
-         display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh}
-    h1{font-size:20px;font-weight:600;margin:0 0 8px}
-    p{font-size:13px;color:#94a3b8;margin:0}
-    .bar{width:220px;height:4px;background:#1e293b;border-radius:2px;margin-top:20px;overflow:hidden}
-    .fill{height:100%;width:30%;background:#38bdf8;border-radius:2px;animation:slide 1.2s ease-in-out infinite}
-    @keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
-  </style></head><body>
-    <h1>SynerRoll</h1>
-    <p id="msg">正在启动计算服务…</p>
-    <div class="bar"><div class="fill"></div></div>
-  </body></html>`
-  splash.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
 }
-
-function updateSplash(msg) {
-  if (splash && !splash.isDestroyed()) {
-    splash.webContents
-      .executeJavaScript(`document.getElementById('msg').textContent=${JSON.stringify(msg)}`)
-      .catch(() => {})
-  }
-}
-
-function closeSplash() {
-  if (splash && !splash.isDestroyed()) splash.close()
-  splash = null
-}
-
-function createMainWindow(bffPort) {
-  mainWindow = new BrowserWindow({
-    width: config.ui.windowWidth,
-    height: config.ui.windowHeight,
-    minWidth: 1024,
-    minHeight: 700,
-    show: false,
-    title: 'SynerRoll',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  })
-
-  mainWindow.once('ready-to-show', () => {
-    closeSplash()
-    mainWindow.show()
-    if (config.ui.openDevTools) mainWindow.webContents.openDevTools({ mode: 'detach' })
-  })
-
-  mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault()
-      mainWindow.hide()
-    }
-  })
-
-  mainWindow.loadURL(`http://${config.host}:${bffPort}/`)
-}
-
-function createTray() {
-  // 图标可选：缺失时用空 Tray（不阻断启动）
-  try {
-    const iconPath = path.join(ROOT, 'resources', 'icon.ico')
-    if (fs.existsSync(iconPath)) {
-      tray = new Tray(iconPath)
-    }
-  } catch (e) {
-    appendLog('launcher.log', `tray icon skip: ${e.message}`)
-  }
-
-  const menu = Menu.buildFromTemplate([
-    { label: '打开 SynerRoll', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus() } } },
-    { type: 'separator' },
-    { label: '查看日志', click: () => shell.openPath(logDir) },
-    {
-      label: '导出诊断包',
-      click: () => {
-        try {
-          const { execSync } = require('child_process')
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-          const zipPath = path.join(logDir, `diagnostics-${stamp}.zip`)
-          execSync(`powershell -Command "Compress-Archive -Path '${logDir}\\*' -DestinationPath '${zipPath}' -Force"`, { timeout: 15000 })
-          dialog.showMessageBox({ type: 'info', title: '诊断包', message: `已生成：\n${zipPath}` })
-        } catch (e) {
-          dialog.showErrorBox('导出失败', e.message)
-        }
-      }
-    },
-    {
-      label: '重启计算引擎',
-      click: async () => {
-        stopChildren()
-        try {
-          await bootServices()
-          if (mainWindow) mainWindow.loadURL(`http://${config.host}:${config.bffPort}/`)
-        } catch (err) {
-          dialog.showErrorBox('重启失败', String(err.message || err))
-        }
-      }
-    },
-    { type: 'separator' },
-    { label: '退出', click: () => { app.isQuitting = true; stopChildren(); app.quit() } }
-  ])
-
-  if (tray) {
-    tray.setToolTip('SynerRoll')
-    tray.setContextMenu(menu)
-    tray.on('double-click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus() } })
-  }
-}
-
-// ── 启动流程 ──────────────────────────────────────────
-async function bootServices() {
-  ensureDirs()
-
-  const juliaPort = await pickPort(config.juliaPort, config.host)
-  const bffPort = await pickPort(config.bffPort, config.host)
-  config.juliaPort = juliaPort
-  config.bffPort = bffPort
-  appendLog('launcher.log', `ports: julia=${juliaPort} bff=${bffPort} host=${config.host}`)
-
-  updateSplash('正在启动 Julia 计算引擎…')
-  startJulia(juliaPort)
-  await waitForHealth(
-    `http://${config.host}:${juliaPort}/health`,
-    config.julia.startupTimeoutSec,
-    'Julia 后端',
-    (a, left) => updateSplash(`等待计算引擎… (${left}s)`)
-  )
-  appendLog('launcher.log', 'Julia healthy')
-
-  updateSplash('正在启动应用服务…')
-  startBff(juliaPort, bffPort)
-  await waitForHealth(
-    `http://${config.host}:${bffPort}/api/v1/health`,
-    config.bff.startupTimeoutSec,
-    'BFF',
-    (a, left) => updateSplash(`等待应用服务… (${left}s)`)
-  )
-  appendLog('launcher.log', 'BFF healthy')
-
-  return bffPort
-}
-
-// ── App 生命周期 ──────────────────────────────────────
-const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) {
-  app.quit()
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.show()
-      mainWindow.focus()
-    }
-  })
-
-  app.whenReady().then(async () => {
-    appendLog('launcher.log', 'app ready')
-    try { createSplash() } catch (e) { appendLog('launcher.log', `splash err: ${e.message}`) }
-    try { createTray() } catch (e) { appendLog('launcher.log', `tray err: ${e.message}`) }
-    try {
-      const bffPort = await bootServices()
-      createMainWindow(bffPort)
-    } catch (err) {
-      closeSplash()
-      appendLog('launcher.log', `boot failed: ${err.message || err}`)
-      dialog.showErrorBox(
-        'SynerRoll 启动失败',
-        `${err.message || err}\n\n请查看日志目录：\n${logDir}`
-      )
-      stopChildren()
+const preferences = preload => ({ preload: path.join(__dirname, preload), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: false })
+function launch(label, executable, args, env, cwd) {
+  const child = spawn(executable, args, { env: { ...process.env, ...env }, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  children.add(child)
+  log('launcher.log', `${label} pid=${child.pid} exe=${executable}`)
+  child.stdout.on('data', bytes => log(`${label}.log`, bytes.toString().trimEnd()))
+  child.stderr.on('data', bytes => log(`${label}.log`, bytes.toString().trimEnd()))
+  child.on('error', error => { child.launchError = error; log('launcher.log', `${label}: ${error.message}`) })
+  child.on('exit', (code, signal) => {
+    log('launcher.log', `${label} exited code=${code} signal=${signal}`)
+    children.delete(child)
+    if (!stopping && mainWindow) {
+      dialog.showErrorBox(`${displayName}服务已停止`, `${label} 意外退出。请重新打开软件。\n日志：${logDir}`)
       app.quit()
     }
   })
-
-  app.on('before-quit', () => { app.isQuitting = true; stopChildren() })
-  app.on('window-all-closed', () => { /* keep tray alive */ })
-
-  process.on('uncaughtException', (err) => {
-    appendLog('launcher.log', `uncaught: ${err.stack || err}`)
+  return child
+}
+async function stopChildren() {
+  stopping = true
+  await Promise.all([...children].map(child => new Promise(resolve => {
+    if (!child.pid) return resolve()
+    // /T also terminates capacity-planning workers owned by the HTTP process.
+    const killer = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+    killer.once('exit', resolve)
+    killer.once('error', () => { child.kill(); resolve() })
+  })))
+  children.clear()
+}
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.on('error', reject)
+    server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)) })
+  })
+}
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: 5000 }, res => {
+      let body = ''
+      res.on('data', chunk => { body += chunk })
+      res.on('end', () => {
+        try { if (res.statusCode !== 200) throw Error(`HTTP ${res.statusCode}`); resolve(JSON.parse(body)) } catch (error) { reject(error) }
+      })
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(Error('timeout')))
+    req.on('error', reject)
+  })
+}
+async function waitHealthy(url, child, seconds, ready) {
+  const deadline = Date.now() + seconds * 1000
+  while (Date.now() < deadline) {
+    if (stopping) throw Error('启动已取消')
+    if (child.launchError) throw child.launchError
+    if (child.exitCode !== null || child.signalCode !== null) throw Error(`服务提前退出，请查看 ${logDir}`)
+    try { const info = await getJson(url); if (ready(info)) return info } catch {}
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  throw Error(`服务启动超过 ${seconds} 秒，请查看 ${logDir}`)
+}
+async function boot() {
+  startup = Date.now()
+  config = loadConfig()
+  const juliaPort = await freePort()
+  let bffPort = await freePort()
+  while (bffPort === juliaPort) bffPort = await freePort()
+  const juliaConfig = require('./runtime.cjs').juliaConfiguration(resources, userRoot)
+  const env = juliaConfig.env
+  try {
+    const prepared = JSON.parse(fs.readFileSync(path.join(userRoot, 'runtime-ready.json'), 'utf8'))
+    if (prepared.version === brand.version) env.PSFA_SKIP_STARTUP_WARMUP = '1'
+  } catch {}
+  const backend = juliaConfig.backend
+  log('launcher.log', `Julia cache mode=${juliaConfig.cacheMode} depot=${juliaConfig.depot}`)
+  const julia = launch('julia', juliaConfig.executable, [...juliaConfig.args, path.join(backend, 'server.jl')], { ...env, PORT: String(juliaPort) }, backend)
+  await waitHealthy(`http://127.0.0.1:${juliaPort}/health`, julia, config.julia.startupTimeoutSec, info => info.status === 'ok' && info.solvers?.HiGHS === true)
+  const bff = launch('bff', path.join(runtime, 'node/node.exe'), [path.join(payload, '.output/server/index.mjs')], {
+    ...env, PORT: String(bffPort), NITRO_PORT: String(bffPort), HOST: '127.0.0.1', NITRO_HOST: '127.0.0.1',
+    JULIA_BACKEND_URL: `http://127.0.0.1:${juliaPort}`, NUXT_PUBLIC_JULIA_WS_BASE: `ws://127.0.0.1:${juliaPort}`, NUXT_PUBLIC_API_BASE: '/api/v1'
+  }, payload)
+  await waitHealthy(`http://127.0.0.1:${bffPort}/api/v1/health`, bff, config.bff.startupTimeoutSec, info => info.data?.ready === true)
+  const origin = `http://127.0.0.1:${bffPort}`
+  mainWindow = new BrowserWindow({ width: config.ui.windowWidth, height: config.ui.windowHeight, minWidth: 1024, minHeight: 700, show: false, autoHideMenuBar: true, title: displayName, icon: path.join(resources, 'icon.ico'), webPreferences: preferences('preload.js') })
+  configureWindow(mainWindow, true)
+  mainWindow.webContents.on('will-navigate', (event, target) => { if (new URL(target).origin !== origin) event.preventDefault() })
+  mainWindow.webContents.on('page-title-updated', event => { event.preventDefault(); mainWindow.setTitle(displayName) })
+  mainWindow.webContents.on('render-process-gone', (_, details) => log('launcher.log', `renderer gone: ${JSON.stringify(details)}`))
+  await mainWindow.loadURL(origin)
+  splash?.destroy()
+  splash = null
+  mainWindow.maximize()
+  mainWindow.show()
+  fs.writeFileSync(path.join(userRoot, 'session.json'), JSON.stringify({ origin, juliaPort, bffPort, pid: process.pid, juliaPid: julia.pid, bffPid: bff.pid, startupSeconds: (Date.now() - startup) / 1000 }, null, 2))
+  log('launcher.log', `ready ${origin} startup=${(Date.now() - startup) / 1000}s`)
+}
+async function startAuthorizedApplication() {
+  try {
+    splash = new BrowserWindow({ width: 540, height: 340, show: false, resizable: false, frame: false, title: displayName, icon: path.join(resources, 'icon.ico'), webPreferences: preferences('shell-preload.js') })
+    configureWindow(splash)
+    await splash.loadFile(shellPage('startup.html'))
+    if (stopping) return
+    splash.show()
+    licenseWindow?.close()
+    licenseWindow = null
+    await boot()
+  } catch (error) {
+    if (!stopping) {
+      log('launcher.log', error.stack || String(error))
+      dialog.showErrorBox(`${displayName}启动失败`, `${error.message}\n\n日志目录：${logDir}`)
+      app.quit()
+    }
+  }
+}
+async function showLicenseWindow() {
+  licenseWindow = new BrowserWindow({ width: 520, height: 460, show: false, resizable: false, frame: true, titleBarStyle: 'hidden', autoHideMenuBar: true, title: `${displayName} - 许可证验证`, icon: path.join(resources, 'icon.ico'), webPreferences: preferences('shell-preload.js') })
+  configureWindow(licenseWindow)
+  licenseWindow.webContents.on('will-navigate', (event, target) => { if (target !== pathToFileURL(shellPage('license.html')).href) event.preventDefault() })
+  await licenseWindow.loadFile(shellPage('license.html'))
+  if (!stopping) licenseWindow.show()
+}
+if (!app.requestSingleInstanceLock()) app.quit()
+else {
+  ipcMain.handle('desktop:brand', event => {
+    if (!trustedShell(event)) throw Error('页面不可访问品牌信息')
+    return brand
+  })
+  ipcMain.handle('license:submit', (event, key) => {
+    if (!trustedShell(event) || event.sender !== licenseWindow?.webContents) throw Error('许可证请求来源无效')
+    if (booting) return { valid: true }
+    const result = verifyLicenseKey(key)
+    if (!result.valid) return { valid: false, message: '无效的许可证密钥。' }
+    authenticated = true
+    booting = true
+    setImmediate(startAuthorizedApplication)
+    return { valid: true }
+  })
+  ipcMain.on('license:cancel', event => { if (trustedShell(event)) app.quit() })
+  ipcMain.handle('desktop:open-location', async (event, location) => {
+    if (!authenticated || !mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw Error('请求来源无效')
+    const locations = { data: dataDir, logs: logDir, settings: configPath }
+    if (!Object.hasOwn(locations, location)) throw Error('无效的位置')
+    const error = await shell.openPath(locations[location])
+    if (error) throw Error(error)
+  })
+  app.on('second-instance', () => {
+    const window = mainWindow || splash || licenseWindow
+    if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus() }
+  })
+  app.whenReady().then(async () => {
+    try {
+      Menu.setApplicationMenu(null)
+      await showLicenseWindow()
+    } catch (error) {
+      if (!stopping) { log('launcher.log', error.stack || String(error)); dialog.showErrorBox(`${displayName}启动失败`, `${error.message}\n\n日志目录：${logDir}`); app.quit() }
+    }
+  })
+  app.on('window-all-closed', () => app.quit())
+  app.on('before-quit', event => {
+    if (stopping) return
+    event.preventDefault()
+    stopChildren().finally(() => app.quit())
   })
 }

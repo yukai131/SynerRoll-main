@@ -9,6 +9,7 @@ import { getDeviceColor, getLayerColor } from '~~/config/device-colors'
 import { pointMinutes, sliceTimeSeries } from '~~/utils/time-series-window'
 import { downsampleTimeSeries } from '~~/utils/chart-downsample'
 import { useVisibleChart } from '~~/composables/useVisibleChart'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
 
@@ -71,18 +72,10 @@ const sliderMax = computed(() => {
   return Math.max(simStartMinutes.value + sliderStepMinutes.value, dataEnd)
 })
 
-const formatTimelineLabel = (minute: number): string => formatCalendarMinute(props.simStartDate, minute)
-
 function emitWindow(next: ChartDisplayWindow): void {
   emit('update:displayWindow', next)
 }
 
-const updateRangeStart = (value: number): void => {
-  emitWindow({ ...props.displayWindow, start: value })
-}
-const updateRangeEnd = (value: number): void => {
-  emitWindow({ ...props.displayWindow, end: value })
-}
 const updateDateRangeStart = (value: number): void => {
   // 日期粗窗变更后细窗重置为该窗口全宽
   emitWindow({
@@ -100,6 +93,21 @@ const updateDateRangeEnd = (value: number): void => {
     end: value
   })
 }
+
+/** dataZoom 定义域 = 日期粗窗；细窗由共享 displayWindow.start/end 驱动 */
+const zoomDomain = computed(() => ({
+  start: dateRangeStartMinutes.value,
+  end: Math.max(dateRangeStartMinutes.value + 1, dateRangeEndMinutes.value)
+}))
+
+const sharedZoom = useSharedDataZoom({
+  getChart: () => chartInstance,
+  getWindow: () => ({ start: rangeStartMinutes.value, end: rangeEndMinutes.value }),
+  getDomain: () => zoomDomain.value,
+  onWindowChange: (win) => {
+    emitWindow({ ...props.displayWindow, start: win.start, end: win.end })
+  }
+})
 
 /** 运行总览只展示整数量级，小数及求解器产生的极小浮点残差直接截断。 */
 function truncateSeriesValue(value: number): number {
@@ -124,12 +132,14 @@ const render = () => {
   }
 
   const layerIds = Object.keys(props.layers).sort((a, b) => Number(a) - Number(b))
+  const domain = zoomDomain.value
   const startMin = rangeStartMinutes.value
   const endMin = rangeEndMinutes.value
 
   const series: echarts.SeriesOption[] = layerIds.map((lid, i) => {
     const points = props.layers[lid] ?? []
-    const filtered = sliceTimeSeries(points, startMin, endMin)
+    // 序列保留日期粗窗全量点，由 dataZoom 控制细窗；抽稀仍按细窗跨度计算
+    const filtered = sliceTimeSeries(points, domain.start, domain.end)
       .map(p => [pointMinutes(p), truncateSeriesValue(p.value)] as [number, number])
     // 大视窗才抽稀；缩小视窗后自动回到全精度点
     const data: [number, number][] = downsampleTimeSeries(filtered, startMin, endMin)
@@ -166,11 +176,12 @@ const render = () => {
       itemHeight: 8,
       textStyle: { fontSize: 9 }
     },
-    grid: { left: 42, right: 12, top: layerIds.length > 1 ? 20 : 24, bottom: 20, containLabel: false },
+    grid: { left: 42, right: 12, top: layerIds.length > 1 ? 20 : 24, bottom: 36, containLabel: false },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'value',
-      min: startMin,
-      max: endMin,
+      min: domain.start,
+      max: domain.end,
       interval: 'auto',
       axisLabel: {
         fontSize: 9,
@@ -219,6 +230,8 @@ const render = () => {
     lazyUpdate: true,
     replaceMerge: ['series']
   })
+
+  sharedZoom.attachDataZoomEvents()
 }
 
 // 数据、单位或共享视窗变化时重绘。
@@ -229,7 +242,11 @@ watch([
   () => props.unit,
   () => props.simStartDate,
   () => props.displayWindow
-], scheduleRender)
+], () => {
+  scheduleRender()
+  // 其他图改了共享细窗时，同步本图 dataZoom（不回写）
+  sharedZoom.syncDataZoomFromWindow()
+})
 
 onMounted(() => {
   scheduleRender()
@@ -257,16 +274,6 @@ onBeforeUnmount(() => {
         :max="sliderMax"
         @update:start="updateDateRangeStart"
         @update:end="updateDateRangeEnd"
-      />
-      <DualRangeSlider
-        :start="rangeStartMinutes"
-        :end="rangeEndMinutes"
-        :min="dateRangeStartMinutes"
-        :max="dateRangeEndMinutes"
-        :step="sliderStepMinutes"
-        :format-label="formatTimelineLabel"
-        @update:start="updateRangeStart"
-        @update:end="updateRangeEnd"
       />
     </div>
   </section>

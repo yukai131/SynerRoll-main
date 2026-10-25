@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # power_grid/model-common.jl — 共享函数
 #
-# model-base.jl 和 model.jl 共用的参数解析与辅助函数
+# 参数解析与辅助函数。
 # ═══════════════════════════════════════════════════════════════════════════
 
 function resolve_power_grid_params(component::PowerGrid, ctx::BuildContext)

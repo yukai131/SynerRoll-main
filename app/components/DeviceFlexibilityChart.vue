@@ -7,6 +7,7 @@ import {
 } from '~~/utils/timeLabel'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { useVisibleChart } from '~~/composables/useVisibleChart'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 
 const SOLID_LINE_LEGEND_ICON = 'path://M0 4H30V6H0Z'
 const DASHED_LINE_LEGEND_ICON = 'path://M0 4H7V6H0Z M11 4H18V6H11Z M23 4H30V6H23Z'
@@ -70,18 +71,10 @@ const sliderMax = computed(() => {
   )
 })
 
-const formatTimelineLabel = (minute: number): string => formatCalendarMinute(props.simStartDate, minute)
-
 function emitWindow(next: ChartDisplayWindow): void {
   emit('update:displayWindow', next)
 }
 
-const updateRangeStart = (value: number): void => {
-  emitWindow({ ...props.displayWindow, start: value })
-}
-const updateRangeEnd = (value: number): void => {
-  emitWindow({ ...props.displayWindow, end: value })
-}
 const updateDateRangeStart = (value: number): void => {
   emitWindow({
     dateStart: value,
@@ -99,10 +92,25 @@ const updateDateRangeEnd = (value: number): void => {
   })
 }
 
+const zoomDomain = computed(() => ({
+  start: dateRangeStartMinutes.value,
+  end: Math.max(dateRangeStartMinutes.value + 1, dateRangeEndMinutes.value)
+}))
+
+const sharedZoom = useSharedDataZoom({
+  getChart: () => chart,
+  getWindow: () => ({ start: rangeStartMinutes.value, end: rangeEndMinutes.value }),
+  getDomain: () => zoomDomain.value,
+  onWindowChange: (win) => {
+    emitWindow({ ...props.displayWindow, start: win.start, end: win.end })
+  }
+})
+
+/** 序列覆盖日期粗窗；细窗由 dataZoom 控制（原 DualRangeSlider） */
 const visibleRows = computed(() =>
   props.rows.filter((row) => {
     const minute = timeLabelToMinutes(row.timestamp)
-    return minute >= rangeStartMinutes.value && minute < rangeEndMinutes.value
+    return minute >= zoomDomain.value.start && minute < zoomDomain.value.end
   })
 )
 
@@ -197,7 +205,8 @@ const render = () => {
       itemHeight: 8,
       textStyle: { fontSize: 10 }
     },
-    grid: { left: 55, right: 18, top: 38, bottom: 30 },
+    grid: { left: 55, right: 18, top: 38, bottom: 42 },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'category',
       data: timeline.value,
@@ -226,13 +235,17 @@ const render = () => {
     lazyUpdate: true,
     replaceMerge: ['series']
   })
+  sharedZoom.attachDataZoomEvents()
 }
 
 watch([
   () => props.rows,
   () => props.simStartDate,
   () => props.displayWindow
-], scheduleRender)
+], () => {
+  scheduleRender()
+  sharedZoom.syncDataZoomFromWindow()
+})
 
 onMounted(() => {
   scheduleRender()
@@ -272,16 +285,6 @@ onBeforeUnmount(() => {
         :max="sliderMax"
         @update:start="updateDateRangeStart"
         @update:end="updateDateRangeEnd"
-      />
-      <DualRangeSlider
-        :start="rangeStartMinutes"
-        :end="rangeEndMinutes"
-        :min="dateRangeStartMinutes"
-        :max="dateRangeEndMinutes"
-        :step="sliderStepMinutes"
-        :format-label="formatTimelineLabel"
-        @update:start="updateRangeStart"
-        @update:end="updateRangeEnd"
       />
     </div>
   </section>

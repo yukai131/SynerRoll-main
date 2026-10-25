@@ -6,9 +6,8 @@ using JuMP
 using CSV
 using DataFrames
 using SHA
-using COPT
 using HiGHS
-using SCIP
+include("utils/optional_copt.jl")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 模块加载
@@ -27,6 +26,7 @@ begin
 
     # 容量规划类型和检测模块（不依赖 utils）
     include("services/capacity_planning/types.jl")
+    include("services/capacity_planning/budget.jl")
     include("services/capacity_planning/variable_detector.jl")
     include("services/capacity_planning/candidate_snapshot.jl")
 
@@ -38,6 +38,7 @@ begin
     include("utils/model_builder_utils.jl")
     include("utils/prediction_utils.jl")
     include("utils/server_utils.jl")
+    include("utils/process_utils.jl")
     include("utils/fitting_curve.jl")
     include("services/fitting_service.jl")
     include("utils/perf_probe.jl")
@@ -88,7 +89,6 @@ begin
     include("components/electrolyzer/validation.jl")
     include("components/electrolyzer/model-common.jl")
     include("components/electrolyzer/flexibility.jl")
-    include("components/electrolyzer/model-base.jl")
     include("components/electrolyzer/model.jl")
 
     include("components/electricity_load/component.jl")
@@ -182,6 +182,7 @@ begin
     # 计算任务模块（计算任务方案：阶段 1-4）
     include("services/task_manager.jl")
     include("services/simulation_runner.jl")
+    include("services/simulation_process.jl")
     include("routes/task.jl")
     include("routes/ingest.jl")
     include("routes/capacity_planning.jl")
@@ -220,31 +221,6 @@ end
 # 1. 解析服务  POST /api/parse
 # 接收前端项目JSON，解析生成: component.json / connection.json / mapping.json
 # ══════════════════════════════════════════════════════════════════════════════
-# @post "/api/parse" function (req)
-#     try
-#         project_json = JSON3.read(req.body, Dict)
-
-#         result = parse_project(project_json)
-
-#         if result.success
-#             return JSON3.write(Dict(
-#                 "success" => true,
-#                 "message" => result.message,
-#                 "outputPath" => result.outputPath,
-#                 "componentCount" => result.componentCount,
-#                 "connectionCount" => result.connectionCount,
-#             ))
-#         else
-#             return JSON3.write(Dict("success" => false, "message" => result.message))
-#         end
-#     catch e
-#         return JSON3.write(Dict(
-#             "success" => false,
-#             "message" => "解析异常: $(sprint(showerror, e))"
-#         ))
-#     end
-# end
-
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 业务错误信息提取：优先 ErrorException.msg（已是中文原因），去掉路由包装前缀
@@ -569,6 +545,20 @@ end
     end
 end
 
+# 2.2.1 边界入库状态  POST /api/boundary/status
+# 返回 boundary.db（time_series_meta, remark='planned') 中已有数据的边界 ID 列表
+# 供前端判断「已关联且有数据 / 空数据 / 未关联」
+@post "/api/boundary/status" function (req)
+    try
+        body = JSON3.read(req.body, Dict)
+        project_id = require_string(body, "projectId")
+        boundary_ids = get_all_boundary_ids(project_id)
+        return json_success(data=Dict("boundaryIds" => boundary_ids))
+    catch e
+        return json_error(_user_errmsg(e, "查询边界状态失败"))
+    end
+end
+
 # 2.3. 设备参数拟合  POST /api/fitting/fit
 # 读取本地 CSV，拟合风机功率曲线或光伏 P(G,T) 关系
 @post "/api/fitting/fit" function (req)
@@ -585,177 +575,14 @@ end
 # # 3. 模型构建服务  POST /api/model/build
 # # 构建优化模型(不求解)
 # # ══════════════════════════════════════════════════════════════════════════════
-# @post "/api/model/build" function (req)
-#     try
-#         body = JSON3.read(req.body, Dict)
-
-#         component_dicts = get(body, "components", [])
-#         algorithms = get(body, "algorithms", Dict())
-#         nodes = get(body, "nodes", [])
-#         layer = get(body, "layer", nothing)
-#         time = get(body, "time", "0:00")
-
-#         if layer === nothing
-#             return JSON3.write(Dict(
-#                 "success" => false,
-#                 "message" => "缺少 layer 配置"
-#             ))
-#         end
-
-#         # 调用model_service构建模型
-#         model = build_model(component_dicts, algorithms, nodes, layer, time)
-
-#         return JSON3.write(Dict(
-#             "success" => true,
-#             "message" => "模型构建成功",
-#             "layerId" => layer["id"],
-#             "time" => time,
-#             "terminationStatus" => string(JuMP.termination_status(model))
-#         ))
-#     catch e
-#         return JSON3.write(Dict(
-#             "success" => false,
-#             "message" => "模型构建异常: $(sprint(showerror, e))"
-#         ))
-#     end
-# end
-
 # # ══════════════════════════════════════════════════════════════════════════════
 # # 4. 模型求解服务  POST /api/model/solve
 # # 求解已构建的优化模型，支持滚动
 # # ══════════════════════════════════════════════════════════════════════════════
-# @post "/api/model/solve" function (req)
-#     try
-#         body = JSON3.read(req.body, Dict)
-
-#         component_dicts = get(body, "components", [])
-#         layer = get(body, "layer", nothing)
-#         time = get(body, "time", "0:00")
-#         rolling = get(body, "rolling", false)
-
-#         if layer === nothing
-#             return JSON3.write(Dict(
-#                 "success" => false,
-#                 "message" => "缺少 layer 配置"
-#             ))
-#         end
-
-#         # 实例化组件
-#         components = [instantiate_component(comp) for comp in component_dicts]
-
-#         # 临时构建模型用于求解(演示用，实际应复用已build的model)
-#         algorithms = get(body, "algorithms", Dict())
-#         nodes = get(body, "nodes", [])
-#         model = build_model(component_dicts, algorithms, nodes, layer, time)
-
-#         # 求解
-#         @info "开始求解 layer=$(layer["id"]) time=$time"
-#         JuMP.optimize!(model)
-
-#         status = JuMP.termination_status(model)
-#         if status != MOI.OPTIMAL
-#             return JSON3.write(Dict(
-#                 "success" => false,
-#                 "message" => "求解失败",
-#                 "terminationStatus" => string(status)
-#             ))
-#         end
-
-#         # 持久化结果到时序库
-#         for component in components
-#             persist_component_results!(model, component, layer, time)
-#         end
-
-#         # 如需滚动: 构建后续层模型并求解
-#         rolling_results = []
-#         if rolling
-#             layers = get(body, "layers", nothing)
-#             if layers !== nothing
-#                 current_time = time
-#                 while time_label_less_than(current_time, time_label_add("0:00", layers["1"]["length"]))
-#                     for layer_id in generate_layer_ids(layers)
-#                         next_layer = layers[layer_id]
-#                         if is_time_divisible(current_time, next_layer["forward"])
-#                             rolling_model = build_model(component_dicts, algorithms, nodes, next_layer, current_time)
-#                             JuMP.optimize!(rolling_model)
-#                             if JuMP.termination_status(rolling_model) == MOI.OPTIMAL
-#                                 for comp in components
-#                                     persist_component_results!(rolling_model, comp, next_layer, current_time)
-#                                 end
-#                                 push!(rolling_results, Dict(
-#                                     "layerId" => layer_id,
-#                                     "time" => current_time,
-#                                     "status" => "solved"
-#                                 ))
-#                             end
-#                         end
-#                         if layer_id == get_max_layer_id(layers)
-#                             current_time = time_label_add(current_time, next_layer["forward"])
-#                         end
-#                     end
-#                 end
-#             end
-#         end
-
-#         return JSON3.write(Dict(
-#             "success" => true,
-#             "message" => "求解完成",
-#             "terminationStatus" => string(status),
-#             "objectiveValue" => JuMP.objective_value(model),
-#             "rollingResults" => rolling_results,
-#             "storedKeys" => list_all_keys()
-#         ))
-#     catch e
-#         return JSON3.write(Dict(
-#             "success" => false,
-#             "message" => "求解异常: $(sprint(showerror, e))"
-#         ))
-#     end
-# end
-
 # # ══════════════════════════════════════════════════════════════════════════════
 # # 5. 数据可视化服务  POST /api/results
 # # 查询优化结果用于可视化
 # # ══════════════════════════════════════════════════════════════════════════════
-# @post "/api/results" function (req)
-#     try
-#         body = JSON3.read(req.body, Dict)
-
-#         component = get(body, "component", nothing)
-#         var_name = get(body, "var_name", nothing)
-#         layer_id = get(body, "layer_id", nothing)
-#         remark = get(body, "remark", nothing)
-
-#         ts, label = query_ts(
-#             component=component,
-#             var_name=var_name,
-#             layer_id=layer_id,
-#             remark=remark
-#         )
-
-#         if ts === nothing
-#             return JSON3.write(Dict(
-#                 "success" => false,
-#                 "message" => "未找到匹配的时序数据",
-#                 "query" => body
-#             ))
-#         end
-
-#         return JSON3.write(Dict(
-#             "success" => true,
-#             "label" => label,
-#             "timestamps" => ts.timestamps,
-#             "values" => ts.values,
-#             "count" => length(ts.values)
-#         ))
-#     catch e
-#         return JSON3.write(Dict(
-#             "success" => false,
-#             "message" => "查询异常: $(sprint(showerror, e))"
-#         ))
-#     end
-# end
-
 # # ══════════════════════════════════════════════════════════════════════════════
 # # 辅助路由
 # # ══════════════════════════════════════════════════════════════════════════════
@@ -769,25 +596,9 @@ end
         solvers["HiGHS"] = false
         solvers["HiGHS_error"] = sprint(showerror, e)
     end
-    try
-        m = Model(COPT.Optimizer)
-        solvers["COPT"] = true
-    catch e
-        solvers["COPT"] = false
-        solvers["COPT_error"] = sprint(showerror, e)
-    end
-    if @isdefined(SCIP_AVAILABLE) && SCIP_AVAILABLE
-        try
-            SCIP.Optimizer()
-            solvers["SCIP"] = true
-        catch e
-            solvers["SCIP"] = false
-            solvers["SCIP_error"] = sprint(showerror, e)
-        end
-    else
-        solvers["SCIP"] = false
-        solvers["SCIP_error"] = "SCIP.jl not installed (optional dependency)"
-    end
+    solvers["COPT"] = COPT_AVAILABLE
+    solvers["COPT_license_checked"] = false
+    COPT_AVAILABLE || (solvers["COPT_error"] = COPT_LOAD_ERROR[])
     return JSON3.write(Dict(
         "status" => "ok",
         "service" => "synerroll-backend",
@@ -799,38 +610,14 @@ end
     ))
 end
 
-# @get "/api/keys" function (req)
-#     return JSON3.write(Dict(
-#         "success" => true,
-#         "keys" => list_all_keys()
-#     ))
-# end
-
-# @post "/api/cache/clear" function (req)
-#     clear_cache()
-#     return JSON3.write(Dict(
-#         "success" => true,
-#         "message" => "时序缓存已清空"
-#     ))
-# end
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 启动服务
 # ══════════════════════════════════════════════════════════════════════════════
 
-println("╔═══════════════════════════════════════════╗")
-println("║   SynerRoll Backend - 统一服务入口         ║")
-println("╠═══════════════════════════════════════════╣")
-println("║  1. POST /api/parse     - 解析服务         ║")
-println("║  2. POST /api/boundary  - 边界录入        ║")
-println("║  3. POST /api/model/build - 模型构建       ║")
-println("║  4. POST /api/model/solve - 模型求解      ║")
-println("║  5. POST /api/results   - 数据可视化       ║")
-println("╚═══════════════════════════════════════════╝")
 println("Starting on port $PORT...")
 
 # ───── 启动预热：避免首次点开/建任务时 JIT 卡顿 ─────
-function warmup_backend()
+function warmup_backend(; strict::Bool=false)
     t0 = time()
     try
         m = Model(HiGHS.Optimizer)
@@ -839,34 +626,41 @@ function warmup_backend()
         @constraint(m, x <= 1.0)
         @objective(m, Max, x)
         optimize!(m)
+        if strict && (termination_status(m) != MOI.OPTIMAL || !isapprox(value(x), 1.0))
+            error("HiGHS 安装检查未得到预期最优解。")
+        end
     catch e
         @warn "warmup: HiGHS mini-model failed" exception=e
+        strict && rethrow()
     end
     try
         tmp = joinpath(mktempdir(), "warmup_timeseries.db")
         store = get_store(tmp)
         set_ts(tmp, "WARMUP|V|power#1", TimeSeries(["0:00"], [1.0]))
-        get_ts_exact(tmp, "WARMUP|V|power#1", "0:00")
+        installed_value = get_ts_exact(tmp, "WARMUP|V|power#1", "0:00")
+        strict && installed_value != 1.0 && error("SQLite 安装检查读写结果不一致。")
         get_ts_floor(tmp, "WARMUP|V|power#1", "0:00")
         write_timeseries_batch!(tmp, [("WARMUP|V|power#1", TimeSeries(["1:00"], [2.0]))])
         query_ts(tmp; source_id="WARMUP", var_name="V", layer_id="1")
         close_store(tmp)
     catch e
         @warn "warmup: timeseries path failed" exception=e
+        strict && rethrow()
     end
     try
         JSON3.write(Dict("ok" => true))
     catch e
         @warn "warmup: JSON3 failed" exception=e
+        strict && rethrow()
     end
     @info "warmup_backend done" elapsed_s=round(time()-t0; digits=3)
     return nothing
 end
 
 # 容量规划 worker 只跑优化，不启动 HTTP/任务路由，避免与父进程争用 tasks.db
-if get(ENV, "SYNERROLL_CAPACITY_WORKER", "") != "1"
+if get(ENV, "SYNERROLL_CAPACITY_WORKER", "") != "1" && get(ENV, "SYNERROLL_SIMULATION_WORKER", "") != "1"
     init_task_routes!()
     init_ingest_routes!()
-    warmup_backend()
-    serve(host="0.0.0.0", port=PORT, async=false, middleware=[CorsMiddleware])
+    get(ENV, "PSFA_SKIP_STARTUP_WARMUP", "") == "1" || warmup_backend()
+    serve(host=get(ENV, "SYNERROLL_HOST", "127.0.0.1"), port=PORT, async=false, middleware=[CorsMiddleware])
 end

@@ -34,14 +34,6 @@ const displayWindow = ref<FlexibilityDisplayWindow>({ ...props.initialWindow })
 const simStartMinutes = computed(() => timeLabelToMinutes(props.simStartTime ?? '0:00'))
 const sliderMax = computed(() => Math.max(simStartMinutes.value + 5, props.simEndMinutes))
 
-const sliderStepMinutes = computed(() => {
-  const steps = props.rows
-    .filter(row => row.direction === 'up')
-    .map(row => timeLabelToMinutes(row.next_timestamp) - timeLabelToMinutes(row.timestamp))
-    .filter(step => Number.isFinite(step) && step > 0)
-  return Math.min(...steps, 5)
-})
-
 function updateDateRangeStart(value: number): void {
   displayWindow.value = {
     ...displayWindow.value,
@@ -60,12 +52,34 @@ function updateDateRangeEnd(value: number): void {
   }
 }
 
-function updateRangeStart(value: number): void {
-  displayWindow.value = { ...displayWindow.value, start: value }
+const zoomDomain = computed(() => ({
+  start: displayWindow.value.dateStart,
+  end: Math.max(displayWindow.value.dateStart + 1, displayWindow.value.dateEnd)
+}))
+
+function applyZoomToCharts(start: number, end: number): void {
+  for (const chart of charts) {
+    chart?.dispatchAction({ type: 'dataZoom', start, end })
+  }
 }
 
-function updateRangeEnd(value: number): void {
-  displayWindow.value = { ...displayWindow.value, end: value }
+function handleDataZoomEvent(params: unknown): void {
+  const raw = params as { batch?: Array<{ start?: number; end?: number }> } | { start?: number; end?: number } | null
+  const item = Array.isArray((raw as { batch?: unknown })?.batch)
+    ? (raw as { batch: Array<{ start?: number; end?: number }> }).batch[0]
+    : (raw as { start?: number; end?: number } | null)
+  if (!item || item.start === undefined || item.end === undefined) return
+  const domain = zoomDomain.value
+  const span = Math.max(1e-6, domain.end - domain.start)
+  const startMin = domain.start + (Math.min(100, Math.max(0, Number(item.start))) / 100) * span
+  const endMin = domain.start + (Math.min(100, Math.max(0, Number(item.end))) / 100) * span
+  const nextStart = Math.min(startMin, endMin)
+  const nextEnd = Math.max(startMin, endMin)
+  if (Math.abs(nextStart - displayWindow.value.start) < 0.5 && Math.abs(nextEnd - displayWindow.value.end) < 0.5) return
+  displayWindow.value = { ...displayWindow.value, start: nextStart, end: nextEnd }
+  const percentStart = ((nextStart - domain.start) / span) * 100
+  const percentEnd = ((nextEnd - domain.start) / span) * 100
+  applyZoomToCharts(percentStart, percentEnd)
 }
 
 function formatTime(minute: number): string {
@@ -81,7 +95,7 @@ function finitePower(value: number | null | undefined): number | null {
 const visibleRows = computed(() => props.rows
   .filter(row => {
     const minute = timeLabelToMinutes(row.timestamp)
-    return minute >= displayWindow.value.start && minute < displayWindow.value.end
+    return minute >= zoomDomain.value.start && minute < zoomDomain.value.end
   })
   .sort((left, right) => timeLabelToMinutes(left.timestamp) - timeLabelToMinutes(right.timestamp)))
 
@@ -109,7 +123,7 @@ const comparisonLines = computed<ComparisonLine[]>(() => {
       })
     },
     {
-      title: '下调系统需求（负值）',
+      title: '下调系统需求',
       color: '#F79009',
       data: downward.flatMap(row => {
         const value = finitePower(row.requirement)
@@ -140,13 +154,21 @@ function render(): void {
     const element = chartElements[index]
     if (!element) return
     charts[index] ??= echarts.init(element)
+    const domain = zoomDomain.value
+    const span = Math.max(1e-6, domain.end - domain.start)
+    const zoomStart = ((displayWindow.value.start - domain.start) / span) * 100
+    const zoomEnd = ((displayWindow.value.end - domain.start) / span) * 100
     charts[index]!.setOption({
       animation: false,
-      grid: { left: 76, right: 24, top: 12, bottom: 30 },
+      grid: { left: 76, right: 24, top: 12, bottom: 48 },
+      dataZoom: [
+        { type: 'inside', start: zoomStart, end: zoomEnd, filterMode: 'none' },
+        { type: 'slider', start: zoomStart, end: zoomEnd, filterMode: 'none', height: 18, bottom: 8 }
+      ],
       xAxis: {
         type: 'value',
-        min: displayWindow.value.start,
-        max: displayWindow.value.end,
+        min: domain.start,
+        max: domain.end,
         axisLabel: { fontSize: 10, formatter: (minute: number) => formatTime(minute) },
         splitLine: { show: false },
         axisLine: { lineStyle: { color: '#D0D5DD' } }
@@ -192,6 +214,8 @@ function render(): void {
         }
       }]
     }, true)
+    charts[index]!.off('datazoom')
+    charts[index]!.on('datazoom', handleDataZoomEvent)
   })
 }
 
@@ -233,16 +257,6 @@ onBeforeUnmount(() => {
           :max="sliderMax"
           @update:start="updateDateRangeStart"
           @update:end="updateDateRangeEnd"
-        />
-        <PrimaryDualRangeSlider
-          :start="displayWindow.start"
-          :end="displayWindow.end"
-          :min="displayWindow.dateStart"
-          :max="displayWindow.dateEnd"
-          :step="sliderStepMinutes"
-          :format-label="formatTime"
-          @update:start="updateRangeStart"
-          @update:end="updateRangeEnd"
         />
       </div>
     </div>

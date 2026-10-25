@@ -118,6 +118,10 @@ export interface ClusteringConfig {
   preserveExtremes?: boolean
   /** C-402：预览后回写的场景集 hash，运行时校验边界数据是否变更 */
   scenarioPreviewHash?: string | null
+  /** 生成场景时的 project.boundariesUpdatedAt，用于打开任务时提示边界已更新 */
+  boundariesVersion?: string | null
+  /** 已保存的场景预览（回显用，打开任务不再自动重算） */
+  savedScenarioPreview?: ScenarioPreviewResult | null
 }
 
 export interface TypicalDayScenario {
@@ -183,7 +187,8 @@ export type CapacityPlanningStatus =
   | 'cancelled'
 
 export interface CapacityOptimizerConfig {
-  method: 'adaptive_de_rand_1_bin_radiuslimited'
+  /** BlackBoxOptim Method 名；前端可用业务展示名映射 */
+  method: string
   maxFuncEvals: number
   populationSize: number
   maxTimeSeconds?: number
@@ -223,17 +228,35 @@ export interface CapacityEconomicConstraintsConfig {
   targetIrrPercent: CapacityConstraint
 }
 
-/** 生命周期经济参数（与 backend lifecycle_economics.jl 字段对齐，snake_case） */
+/**
+ * 生命周期经济参数（与 backend lifecycle_economics.jl 字段对齐，snake_case）。
+ *
+ * 单位约定（必须遵守，否则投资/税负会差 100 倍）：
+ * - 税率/比例类（output_vat_rate / input_vat_rate / construction_vat_rate /
+ *   surcharge_rate / salvage_rate_default / fixed_om_ratio / income_tax_rate /
+ *   discount_rate）在 **config 与 API 中一律为小数**（0.10 = 10%）。
+ *   UI 表单可按百分数展示，提交前需 ÷100。后端 lifecycle_params_from_config
+ *   对 >1 的值会再做一次 /100 兜底，并把 salvage_rate_default 夹紧到 [0,1]。
+ * - working_capital_rate 是「元/容量单位」，不是百分比。
+ * - staff_salary_wan 为万元/人·年；fixed_om_wan 为万元/年。
+ */
 export interface CapacityLifecycleParams {
   tax_holiday_years?: number
   tax_half_years?: number
+  /** 小数，0.13 = 13% */
   output_vat_rate?: number
+  /** 小数，0.13 = 13% */
   input_vat_rate?: number
+  /** 小数，0.10 = 10% */
   construction_vat_rate?: number
+  /** 小数，0.12 = 12% */
   surcharge_rate?: number
+  /** 元/容量单位（非百分比） */
   working_capital_rate?: number
+  /** 小数，0.05 = 5%；将被夹紧到 [0,1] */
   salvage_rate_default?: number
   staff_salary_wan?: number
+  /** 小数，0.015 = 1.5%/年 */
   fixed_om_ratio?: number
   fixed_om_wan?: number
   subsidy_yuan_per_kwh?: number
@@ -242,7 +265,9 @@ export interface CapacityLifecycleParams {
   irr_penalty_weight?: number
   /** 覆盖默认 operation_years / discount_rate / income_tax_rate 时也可写在此处 */
   operation_years?: number
+  /** 小数，0.08 = 8% */
   discount_rate?: number
+  /** 小数，0.25 = 25% */
   income_tax_rate?: number
 }
 
@@ -276,6 +301,32 @@ export interface CapacityPlanningConvergencePoint {
   fitness: number
   feasible: boolean
   bestSoFar: number | null
+  /** 单次评价的图表指标摘要（技术指标 / 经济指标 / 是否带惩罚） */
+  metrics?: CapacityPlanningEvaluationMetrics | null
+}
+
+/** 收敛曲线与指标卡用的单次评价指标 */
+export interface CapacityPlanningEvaluationMetrics {
+  feasible?: boolean
+  /** 当前单次评价的适应度；旧任务可能缺失，前端回退到收敛点外层 fitness */
+  fitness?: number | null
+  /** 存在约束/技术惩罚时为 true，前端将该点标红 */
+  hasPenalty?: boolean
+  renewableConsumptionRate?: number | null
+  greenPowerShare?: number | null
+  purchasedPowerShare?: number | null
+  stability?: number | null
+  /** 稳定性拆分：过剩时段占比 % */
+  stabilityExcessShare?: number | null
+  /** 稳定性拆分：缺额时段占比 % */
+  stabilityShortageShare?: number | null
+  objectiveFitness?: number | null
+  weightedOperatingCost?: number | null
+  lifecycleCapexWan?: number | null
+  irr?: number | null
+  lcoe?: number | null
+  npv?: number | null
+  constraintPenalty?: number | null
 }
 
 export interface CapacityPlanningProgress {
@@ -285,8 +336,12 @@ export interface CapacityPlanningProgress {
   maxFuncEvals?: number
   bestFitness: number | null
   bestCandidate: Record<string, { value: number; unit: string; mode: CapacityVariableMode }> | null
+  /** 当前最优候选的 fitness 拆解摘要（目标 + 约束/技术惩罚），供 Step5 展示 */
+  bestBreakdown?: CapacityPlanningBestBreakdownSummary | null
   convergence?: CapacityPlanningConvergencePoint[]
   elapsedMs: number
+  /** 自规划任务启动以来的墙钟耗时；用于界面展示，保持单调递增 */
+  wallElapsedMs?: number
   cancellationRequested?: boolean
   currentEvaluation?: number
   currentScenario?: {
@@ -298,6 +353,30 @@ export interface CapacityPlanningProgress {
     elapsedMs: number
   } | null
   stopReason?: string | null
+}
+
+/** 最优 fitness 拆解摘要（后端 progress / result 共用口径） */
+export interface CapacityPlanningBestBreakdownSummary {
+  objectiveFitness?: number | null
+  weightedOperatingCost?: number | null
+  constraintPenalty?: number | null
+  constraintPenaltyInObjectiveUnit?: number | null
+  technicalConstraintPenalty?: number | null
+  fitnessPenaltyMode?: string | null
+  technicalMetrics?: Record<string, number> | null
+  technicalConstraintDetails?: Array<{
+    key: string
+    value: number
+    operator: string
+    threshold: number
+    shortfall: number
+    penalty: number
+  }> | null
+  indicators?: {
+    npv?: number | null
+    irr?: number | null
+    lcoe?: number | null
+  } | null
 }
 
 export interface CapacityPlanningTask {
@@ -382,6 +461,12 @@ export interface CapacityPlanningLifecycleBreakdown {
   lifecycleNpvAfterTaxWan?: number
   lifecyclePaybackYears?: number
   lifecycleDiscountedPaybackYears?: number
+  /** 生命周期折现总成本（万元） */
+  lifecycleDiscountedCostWan?: number
+  /** 重置投资合计（万元） */
+  lifecycleReplaceCapexTotalWan?: number
+  lifecycleAnnualFixedOmWan?: number
+  lifecycleAnnualSubsidyWan?: number
   indicators?: CapacityPlanningLifecycleIndicators
 }
 
@@ -496,6 +581,10 @@ export type CapacityComparisonMetricKey =
   | 'lcoe'
   | 'paybackYears'
   | 'discountedPaybackYears'
+  | 'renewableConsumptionRate'
+  | 'greenPowerShare'
+  | 'purchasedPowerShare'
+  | 'stability'
 
 export interface CapacityComparisonMetricSource {
   key: CapacityComparisonMetricKey
@@ -508,8 +597,9 @@ export interface CapacityComparisonMetricSource {
 
 export interface CapacityComparisonScenarioContribution {
   scenarioId: string
+  /** 该典型场景按代表天数加权后的净运行成本；负数表示净收益 */
   weightedCostYuan: number
-  /** 占该候选加权运行成本比重 0-1，不可算为 null */
+  /** 占全部场景成本绝对值之和的比重 0-1；所有场景均为 0 时为 null */
   share: number | null
 }
 

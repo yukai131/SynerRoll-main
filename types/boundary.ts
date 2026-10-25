@@ -200,22 +200,74 @@ export const BOUNDARY_MEANING_UNITS: Record<BoundaryMeaning, string> = {
 }
 
 /**
- * 含义允许的单位选项。负荷需兼容电/热（kW）与氢（kg/h），
- * 由边界条目上的 `unit` 字段覆盖默认单位。
+ * 负荷类组件 → 展示单位。
+ * 软件不做单位换算：单位由「含义 + 组件介质」唯一决定，用户不可配置。
+ * ELOAD/QLOAD 为功率（kW），HLOAD 为质量流量（kg/h）。
  */
-export const BOUNDARY_MEANING_UNIT_OPTIONS: Partial<Record<BoundaryMeaning, string[]>> = {
-  load: ['kW', 'kg/h'],
-  power: ['kW'],
-  factor: ['', '%', 'p.u.']
+export const LOAD_COMPONENT_UNITS: Readonly<Record<string, string>> = Object.freeze({
+  ELOAD: 'kW',
+  QLOAD: 'kW',
+  HLOAD: 'kg/h'
+})
+
+/** 负荷介质（由组件类型带出） */
+export type LoadMedium = 'electric' | 'heat' | 'hydrogen' | 'unknown'
+
+export const LOAD_COMPONENT_MEDIUMS: Readonly<Record<string, LoadMedium>> = Object.freeze({
+  ELOAD: 'electric',
+  QLOAD: 'heat',
+  HLOAD: 'hydrogen'
+})
+
+export function loadMediumOfComponentKey(componentKey?: string | null): LoadMedium {
+  return LOAD_COMPONENT_MEDIUMS[componentKey ?? ''] ?? 'unknown'
 }
 
-/** 读取边界单位：优先条目上的 unit，否则用含义默认单位 */
+/**
+ * 根据含义 + 关联组件类型推导展示单位。
+ * load：由组件介质决定；电/热 → kW，氢 → kg/h。
+ * 未关联或介质未知时回退含义默认单位。
+ * 混用 kW 与 kg/h 时返回空串，由调用方校验拦截。
+ */
+export function deriveBoundaryUnit(
+  meaning: BoundaryMeaning | string,
+  componentKeys: readonly (string | null | undefined)[] = []
+): string {
+  const key = meaning as BoundaryMeaning
+  if (key !== 'load') {
+    return BOUNDARY_MEANING_UNITS[key] ?? ''
+  }
+  const units = new Set<string>()
+  for (const ck of componentKeys) {
+    const unit = LOAD_COMPONENT_UNITS[ck ?? '']
+    if (unit) units.add(unit)
+  }
+  if (units.size === 1) return [...units][0]!
+  if (units.size > 1) return ''
+  return BOUNDARY_MEANING_UNITS.load
+}
+
+/** 负荷边界同时关联电/热（kW）与氢（kg/h）组件时为 true，必须拦截 */
+export function hasLoadUnitConflict(componentKeys: readonly (string | null | undefined)[]): boolean {
+  return deriveBoundaryUnit('load', componentKeys) === '' && componentKeys.some(ck => !!LOAD_COMPONENT_UNITS[ck ?? ''])
+}
+
+/**
+ * 读取边界单位：派生优先（含义+组件），旧数据 unit 仅作无组件时的展示回退。
+ * 不再允许用户配置单位。
+ */
 export function resolveBoundaryUnit(
   item: { meaning?: string; unit?: string | null },
-  fallbackMeaning?: BoundaryMeaning | string
+  fallbackMeaning?: BoundaryMeaning | string,
+  componentKeys?: readonly (string | null | undefined)[]
 ): string {
+  if (componentKeys?.length) {
+    const derived = deriveBoundaryUnit(item.meaning ?? fallbackMeaning ?? '', componentKeys)
+    if (derived !== '' || hasLoadUnitConflict(componentKeys)) return derived
+  }
   const explicit = (item.unit ?? '').trim()
-  if (explicit) return explicit
+  if (explicit && item.meaning !== 'load') return explicit
+  if (explicit && item.meaning === 'load' && !componentKeys?.length) return explicit
   const key = (item.meaning ?? fallbackMeaning ?? '') as BoundaryMeaning
   return BOUNDARY_MEANING_UNITS[key] ?? ''
 }
@@ -241,7 +293,10 @@ export interface BoundaryItem {
   columnName: string
   timeStep: string
   meaning: BoundaryMeaning
-  /** 显式单位覆盖；负荷等多单位含义必填或按此展示（如 load: kW / kg/h） */
+  /**
+   * 展示单位（派生只读，非用户配置）。
+   * 现由 deriveBoundaryUnit(meaning, 组件类型) 推导；历史字段仅作无组件时回退。
+   */
   unit?: string
   relatedComponents: string[]
   interpolateType: InterpolateType
@@ -281,26 +336,7 @@ export interface BoundaryTransformedData {
   }[]
 }
 
-// NOTE: 2026-07-07 — 与 boundaryKey 重构配套保留
-// BOUNDARY_COMPONENT_MAPPINGS 现在跟 ComponentDefinition.boundaryKey (types/component.ts)
-// 重复且发散（前者固定 WT/PV → 1~2 个 meaning，后者每个组件各自声明 3~4 个）。
-// 下一步清理应迁移到 componentDefinitionMap[def.key].boundaryKey?.includes(meaning) 的查询。
-// 暂时注释保留，避免回归时丢失原始逻辑。
 
-/*
-// 边界与组件的映射关系（用于自动创建边界）
-export interface BoundaryComponentMapping {
-  componentKey: string
-  defaultMeanings: BoundaryMeaning[]
-}
-
-// WT组件需要的边界：风速
-// PV组件需要的边界：辐照度、温度
-export const BOUNDARY_COMPONENT_MAPPINGS: BoundaryComponentMapping[] = [
-  { componentKey: 'WT', defaultMeanings: ['wind_speed'] },
-  { componentKey: 'PV', defaultMeanings: ['irradiance', 'temperature'] }
-]
-*/
 
 // 边界相关配置的可编辑字段
 export interface BoundaryConfigFields {

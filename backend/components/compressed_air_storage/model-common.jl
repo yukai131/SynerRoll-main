@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # compressed_air_storage/model-common.jl — 共享函数
 #
-# model-base.jl 和 model.jl 共用的参数解析与辅助函数
+# 参数解析与辅助函数。
 # ═══════════════════════════════════════════════════════════════════════════
 
 function resolve_compressed_air_storage_params(component::CompressedAirStorage, ctx::BuildContext)

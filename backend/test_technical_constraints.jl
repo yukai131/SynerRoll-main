@@ -3,14 +3,8 @@ using Test
 using JSON3
 const TEST_DATA_ROOT = mktempdir(; cleanup=false)
 ENV["SYNERROLL_DATA_DIR"] = TEST_DATA_ROOT
-const server_path = joinpath(@__DIR__, "server.jl")
-const server_source = read(server_path, String)
-const load_end = findfirst("# 全局常量", server_source)
-load_source = replace(server_source[1:first(load_end)-1], "using COPT"=>"", ""=>"")
-runner_path = joinpath(@__DIR__, "services/capacity_planning/optimization_runner.jl")
-load_source = replace(load_source, "include(\"services/capacity_planning/optimization_runner.jl\")" =>
-    "include_string(Main, replace(read($(repr(runner_path)), String), \"using COPT\"=>\"\"), $(repr(runner_path)))")
-include_string(Main, load_source, server_path)
+ENV["SYNERROLL_CAPACITY_WORKER"] = "1"
+include(joinpath(@__DIR__, "server.jl"))
 
 const library = JSON3.read(read(joinpath(@__DIR__, "../config/component-library.json"), String), Dict{String,Any})["components"]
 function fixture_node(id, key; capacity=100.0, boundaries=String[])

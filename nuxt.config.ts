@@ -2,7 +2,10 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineNuxtConfig({
   compatibilityDate: '2026-04-13',
-  devtools: { enabled: true },
+  debug: false,
+  nitro: { debug: false },
+  devtools: { enabled: false },
+  ignore: ['**/packaging/**', '**/dist/**', '**/backend/**'],
   css: ['~/assets/css/main.css'],
   runtimeConfig: {
     // 服务端：Julia 后端 HTTP 基地址（可用环境变量 JULIA_BACKEND_URL 覆盖）

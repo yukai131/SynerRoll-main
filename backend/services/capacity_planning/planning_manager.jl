@@ -171,6 +171,9 @@ function _normalize_clustering_config(raw, project_id::String, canvas_id::String
         "canvasId" => canvas_id,
         "preserveExtremes" => get(config, "preserveExtremes", true) == true,
         "scenarioPreviewHash" => get(config, "scenarioPreviewHash", nothing),
+        # 打开任务时对比边界是否已更新；savedScenarioPreview 供回显、不自动重算
+        "boundariesVersion" => get(config, "boundariesVersion", nothing),
+        "savedScenarioPreview" => get(config, "savedScenarioPreview", nothing),
         "datasetId" => isempty(dataset_id) ? nothing : dataset_id,
         "featureIds" => feature_ids,
         "clusterCount" => Int(get(config, "clusterCount", 0)),
@@ -185,7 +188,7 @@ end
 """
     _planning_computable_snapshot(snapshot) -> Dict{String,Any}
 
-提取参与计算的快照子集（params_hash 语义，对齐 01-开发文档/05-数据结构与接口契约 §4）：
+提取参与计算的快照子集，用于 params_hash：
 仅保留画布 id/nodes/edges 与 boundaries、layerConfig、algorithm、solverConfig 等计算字段，
 剔除 viewport、display、画布名称、updateTime 等 UI/非计算字段，
 保证相同计算输入得到唯一 snapshotHash（画布视口拖动、重命名不再使 hash 变化）。
@@ -294,7 +297,7 @@ function _mark_planning_cancelled!(planning_id::String)
     set_planning_status!(planning_id, "cancelled")
 end
 
-function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, command::Cmd, timeout_seconds::Real)
+function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, command::Cmd, timeout_seconds::Real; compile_aware::Bool=true)
     process = nothing
     log = nothing
     timed_out = false
@@ -310,17 +313,20 @@ function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, 
             ctx.process = process
         end
         launched_at = time()
-        # maxTimeSeconds = 规划总墙钟（含 worker 启动）；与测试/取消语义一致
-        deadline = launched_at + timeout_seconds
+        # 正式 worker 使用排除 JIT 的预算时钟并把剩余预算传给原生求解器。
+        # 自定义外部 worker 无 Julia 编译计时协议，仍由父进程作墙钟看门狗。
+        deadline = compile_aware ? Inf : launched_at + timeout_seconds
         heartbeat_at = launched_at
         while process_running(process)
             if ctx.cancel_requested[] || time() >= deadline
                 timed_out = !ctx.cancel_requested[]
-                kill(process) # only this task's child; never the shared HTTP backend
+                terminate_worker_process!(process)
                 break
             end
             if time() - heartbeat_at >= 1.0
-                update_planning_elapsed!(planning_id, round(Int, (time() - launched_at)*1000))
+                if !compile_aware
+                    update_planning_elapsed!(planning_id, round(Int, (time() - launched_at)*1000))
+                end
                 heartbeat_at = time()
             end
             sleep(0.1)
@@ -354,7 +360,7 @@ function _supervise_planning_worker!(planning_id::String, ctx::PlanningContext, 
         end
     finally
         if process !== nothing && process_running(process)
-            kill(process)
+            terminate_worker_process!(process)
             wait(process)
         end
         log !== nothing && close(log)
@@ -377,7 +383,8 @@ function start_capacity_planning!(planning_id::String; worker_command::Union{Not
     end
     timeout_seconds = Float64(get(task["config"]["optimizer"], "maxTimeSeconds", 86400.0))
     command = worker_command === nothing ? planning_worker_command(planning_id) : worker_command
-    worker = @async _supervise_planning_worker!(planning_id, ctx, command, timeout_seconds)
+    worker = @async _supervise_planning_worker!(planning_id, ctx, command, timeout_seconds;
+        compile_aware=worker_command === nothing)
     ctx.julia_task = worker
     return get_planning_task(planning_id)
 end

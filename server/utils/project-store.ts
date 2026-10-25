@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
@@ -7,13 +7,13 @@ import { createInitialProjects, normalizeProject } from '~~/utils/project-factor
 import { cloneCanvasWithFreshIds } from '~~/utils/canvas'
 import { deepClone } from '~~/utils/clone'
 import { createBoundaryId, createId } from '~~/utils/id'
+import { projectsBoundaryRoot as resolveProjectsBoundaryRoot } from '#server/utils/backend-data'
 
-const dataDirectory = join(process.cwd(), 'server', 'data')
+const dataDirectory = process.env.SYNERROLL_DATA_DIR || join(process.cwd(), 'server', 'data')
 const dataFile = join(dataDirectory, 'projects.json')
 
-// 项目 boundary 时序数据库目录：backend/data/projects/<project_id>/boundary.db
-// 由计算任务方案阶段 0 引入，每个项目独立一份
-const projectsBoundaryRoot = join(process.cwd(), '..', 'backend', 'data', 'projects')
+// 项目 boundary 时序数据库目录：与 Julia BACKEND_DATA_DIR 同源
+const projectsBoundaryRoot = resolveProjectsBoundaryRoot()
 
 // Serialize store access so requests never read a half-written JSON file.
 let storeOperationQueue: Promise<void> = Promise.resolve()
@@ -30,24 +30,9 @@ const buildSeedProjects = (): Project[] =>
 const writeProjectsUnlocked = async (projects: Project[]): Promise<void> => {
   await mkdir(dataDirectory, { recursive: true })
   const jsonStr = JSON.stringify(projects, null, 2)
-  // console.log(`[STORE] writing projects.json: ${(jsonStr.length / 1024).toFixed(1)} KB, projects=${projects.length}`)
-  for (const p of projects) {
-    const boundaryBytes = JSON.stringify(p.boundaries ?? []).length
-    if (boundaryBytes > 10000) {
-      // console.log(`[STORE]   project ${p.id} boundaries JSON: ${(boundaryBytes / 1024).toFixed(1)} KB, count=${(p.boundaries ?? []).length}`)
-      for (const b of (p.boundaries ?? [])) {
-        const bAny = b as any
-        const rawLen = bAny.rawData?.values?.length ?? 0
-        const transLayers = bAny.transformedData?.layers ?? []
-        if (rawLen > 100 || transLayers.length > 0) {
-          const transPoints = transLayers.reduce((s: number, l: any) => s + (l.values?.length ?? 0), 0)
-          // console.log(`[STORE]     boundary ${b.id} rawData=${rawLen}pts transformedData=${transPoints}pts layers=${transLayers.length}`)
-        }
-      }
-    }
-  }
-  await writeFile(dataFile, jsonStr, 'utf8')
-  // console.log(`[STORE] projects.json written OK`)
+  const temporaryFile = `${dataFile}.tmp`
+  await writeFile(temporaryFile, jsonStr, 'utf8')
+  await rename(temporaryFile, dataFile)
 }
 
 // 确保某项目的 boundary 时序库文件存在（空文件即可，Julia 后端打开时会自动建表）
@@ -103,6 +88,7 @@ const copyProjectBoundaryDb = async (
   // 把 WAL 内容合并进主库，保证 copyFile 拿到完整数据
   const source = new DatabaseSync(sourceDb)
   try {
+    source.exec('PRAGMA busy_timeout=3000')
     source.exec('PRAGMA wal_checkpoint(TRUNCATE)')
   }
   finally {
@@ -117,6 +103,7 @@ const copyProjectBoundaryDb = async (
   if (boundaryIdMap && boundaryIdMap.size > 0) {
     const target = new DatabaseSync(targetDb)
     try {
+      target.exec('PRAGMA busy_timeout=3000')
       target.exec('BEGIN IMMEDIATE')
       for (const [oldId, newId] of boundaryIdMap) {
         if (oldId === newId) continue
@@ -310,17 +297,17 @@ export const updateProject = async (
     }
 
     const nextProject = updater(normalizeProject(projects[projectIndex]!))
-    const persistedProject = {
+    const persistedProject = normalizeProject({
       ...nextProject,
       updateTime: new Date().toISOString()
-    }
+    })
 
     const nextProjects = [...projects]
     nextProjects[projectIndex] = persistedProject
 
     await writeProjectsUnlocked(nextProjects)
 
-    return normalizeProject(persistedProject)
+    return persistedProject
   })
 
 export const createProjectRecord = async (project: Project): Promise<Project> =>
@@ -363,7 +350,15 @@ export const copyProjectRecord = async (projectId: string, preferredName?: strin
 
     const nextProjects = [...projects, copiedProject]
     await writeProjectsUnlocked(nextProjects)
-    await copyProjectBoundaryDb(projectId, copiedProject.id, boundaryIdMap)
+    try {
+      await copyProjectBoundaryDb(projectId, copiedProject.id, boundaryIdMap)
+    }
+    catch (copyError) {
+      // 复制时序库失败：回滚项目记录，避免半成品副本
+      await writeProjectsUnlocked(projects)
+      await removeProjectBoundaryDb(copiedProject.id).catch(() => {})
+      throw copyError
+    }
 
     return copiedProject
   })

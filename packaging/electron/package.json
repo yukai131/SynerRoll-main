@@ -1,8 +1,9 @@
 {
-  "name": "synerroll-launcher",
-  "version": "0.1.0",
-  "description": "SynerRoll 综合能源优化建模工作台",
+  "name": "psfa",
+  "version": "1.0.0",
+  "description": "新能源发电系统建模、仿真与灵活性量化评估软件",
   "private": true,
+  "author": "龙源（北京）新能源工程技术有限公司",
   "main": "main.js",
   "scripts": {
     "start": "electron ."

@@ -102,6 +102,20 @@ end
     end
 end
 
+@get "/api/capacity-planning/{id}/scenarios" function (req, id)
+    try
+        planning_id = String(id)
+        task = get_planning_task(planning_id)
+        task === nothing && return json_error("容量规划任务不存在: $(planning_id)")
+        scenario_path = joinpath(planning_task_dir(planning_id), "scenarios.json")
+        isfile(scenario_path) || return json_error("典型场景结果尚未生成")
+        scenario_set = JSON3.read(read(scenario_path, String), Dict{String,Any})
+        return json_success(data = scenario_set)
+    catch e
+        return json_error("查询典型场景结果失败: $(sprint(showerror, e))")
+    end
+end
+
 @get "/api/capacity-planning/{id}/comparison" function (req, id)
     try
         return json_success(data = build_planning_comparison(String(id)))
@@ -122,10 +136,23 @@ end
 
 @delete "/api/capacity-planning/{id}" function (req, id)
     try
-        delete_planning_record!(String(id))
-        return json_success(data = Dict("planningId" => String(id)))
+        planning_id = String(id)
+        task = get_planning_task(planning_id)
+        task === nothing && error("规划任务不存在: $(planning_id)")
+        task["status"] in PLANNING_DELETABLE_STATUSES ||
+            error("只能清理草稿、已完成、失败或已取消的规划任务")
+        # 终态刚发布时 supervisor 可能仍在关闭日志/进程句柄，等待其完整退出后再删目录。
+        ctx = lock(PLANNING_CONTEXTS_LOCK) do
+            get(PLANNING_CONTEXTS, planning_id, nothing)
+        end
+        ctx !== nothing && ctx.julia_task !== nothing && wait(ctx.julia_task)
+        delete_planning_record!(planning_id)
+        return json_success(
+            data = Dict("planningId" => planning_id),
+            message = "容量规划任务及计算数据已清理",
+        )
     catch e
-        return json_error("删除容量规划任务失败: $(sprint(showerror, e))")
+        return json_error("清理容量规划任务失败: $(sprint(showerror, e))")
     end
 end
 

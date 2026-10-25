@@ -78,9 +78,44 @@ Base.@kwdef struct LifecycleCapexItem
 end
 
 """
+税率/比例类字段：数学口径为小数（0.10 = 10%），但 UI 与历史配置可能写百分数（10 = 10%）。
+`working_capital_rate`（元/容量单位）、`staff_salary_wan`、年限、权重等不在此列。
+"""
+const LIFECYCLE_PERCENT_RATE_FIELDS = (
+    :income_tax_rate,
+    :output_vat_rate,
+    :input_vat_rate,
+    :construction_vat_rate,
+    :surcharge_rate,
+    :salvage_rate_default,
+    :fixed_om_ratio,
+    :discount_rate,
+)
+
+"""
+    normalize_lifecycle_rate(field, value) -> Float64
+
+把可能来自 UI 的百分数归一成小数。合法小数税率 < 1；≥ 1 视为百分数并 /100
+（UI 上 1 表示 1%，不能当成 100%）。残值率额外夹紧到 [0, 1]，避免负折旧。
+"""
+function normalize_lifecycle_rate(field::Symbol, value::Real)::Float64
+    v = Float64(value)
+    if field in LIFECYCLE_PERCENT_RATE_FIELDS && v >= 1.0
+        v /= 100.0
+    end
+    if field === :salvage_rate_default
+        v = clamp(v, 0.0, 1.0)
+    elseif field in LIFECYCLE_PERCENT_RATE_FIELDS
+        v = max(v, 0.0)
+    end
+    return v
+end
+
+"""
     lifecycle_params_from_config(config) -> LifecycleFinancialParams
 
 economics config 中 `lifecycle` 子字典可覆盖任一参数字段（snake_case 键名）。
+税率/比例字段自动识别百分数写法并归一为小数（见 `normalize_lifecycle_rate`）。
 """
 function lifecycle_params_from_config(config::AbstractDict)::LifecycleFinancialParams
     overrides = get(config, "lifecycle", Dict{String,Any}())
@@ -91,7 +126,13 @@ function lifecycle_params_from_config(config::AbstractDict)::LifecycleFinancialP
         raw = overrides[string(field)]
         raw isa Real || continue
         default_value = getfield(defaults, field)
-        kwargs[field] = default_value isa Integer ? round(Int, raw) : Float64(raw)
+        if default_value isa Integer
+            kwargs[field] = round(Int, raw)
+        elseif field in LIFECYCLE_PERCENT_RATE_FIELDS
+            kwargs[field] = normalize_lifecycle_rate(field, raw)
+        else
+            kwargs[field] = Float64(raw)
+        end
     end
     return LifecycleFinancialParams(; kwargs...)
 end

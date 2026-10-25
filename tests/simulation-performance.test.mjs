@@ -6,7 +6,7 @@ import { join, dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { readTaskSeriesData, readTaskFlexibility } from '../server/utils/sqlite-reader.ts'
 import { createTaskRequestGate } from '../utils/task-refresh.ts'
-import { sliceTimeSeries } from '../utils/time-series-window.ts'
+import { pairTimeSeriesWindow, sliceTimeSeries } from '../utils/time-series-window.ts'
 import { downsampleTimeSeries } from '../utils/chart-downsample.ts'
 
 test('committed deltas, overlapping revisions, boundary ranges and old database compatibility', () => {
@@ -110,4 +110,19 @@ test('half-open chart windows and chronological extrema-preserving sampling', ()
   assert.equal(sampled[0][0], 0)
   assert.equal(sampled.at(-1)[0], 9999)
   assert.equal(downsampleTimeSeries(large, 0, 48 * 60), large, 'small windows keep original precision')
+})
+
+test('8760-hour chart sampling keeps the complete selected window instead of the yearly prefix', () => {
+  const timestamps = Array.from({ length: 8760 }, (_, hour) => `${hour}:00`)
+  const values = Array.from({ length: 8760 }, (_, hour) => Math.sin(hour))
+  const start = 4380 * 60
+  const end = 8760 * 60
+  const windowed = pairTimeSeriesWindow(timestamps, values, start, end)
+  const sampled = downsampleTimeSeries(windowed, start, end, 1200)
+
+  assert.equal(windowed.length, 4380)
+  assert.equal(sampled[0][0], start)
+  assert.equal(sampled.at(-1)[0], (8760 - 1) * 60)
+  assert(sampled.length <= 1200)
+  assert(sampled.every(point => point[0] >= start && point[0] < end))
 })

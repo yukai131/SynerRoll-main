@@ -3,6 +3,7 @@ type SeriesSourceMode = 'manual' | 'file' | 'boundary'
 
 interface BoundarySeriesOption {
   value: string
+  boundaryId: string
   label: string
   timestamps: string[]
   values: number[]
@@ -249,15 +250,19 @@ const applyBoundarySeries = () => {
 
 watch(selectedBoundary, () => {
   if (props.mode !== 'boundary') return
-  const boundaryId = selectedBoundary.value.split(':')[0] ?? ''
-  emit('update:boundaryId', boundaryId)
+  const option = props.boundaryOptions?.find(item => item.value === selectedBoundary.value)
+  emit('update:boundaryId', option?.boundaryId ?? '')
   applyBoundarySeries()
 })
 
 watch(() => props.mode, (mode) => {
   if (mode === 'manual') validateManualRows()
   else if (mode === 'file') setValidation(fileLoaded.value ? validationMessage.value : '请选择并导入一个时序文件')
-  else if (mode === 'boundary') applyBoundarySeries()
+  else if (mode === 'boundary') {
+    const option = props.boundaryOptions?.find(item => item.value === selectedBoundary.value)
+    emit('update:boundaryId', option?.boundaryId ?? '')
+    applyBoundarySeries()
+  }
   else emit('update:boundaryId', '')
 }, { immediate: true })
 

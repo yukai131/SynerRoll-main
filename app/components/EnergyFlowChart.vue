@@ -5,6 +5,7 @@ import {
   timeLabelToMinutes
 } from '~~/utils/timeLabel'
 import { downsampleTimeSeries } from '~~/utils/chart-downsample'
+import { useSharedDataZoom } from '~~/composables/useSharedDataZoom'
 import { formatCalendarMinute } from '~~/utils/calendarTime'
 import { getEnergyFlowColor } from '~~/config/device-colors'
 import { getResultFlowMedium, RESULT_FLOW_QUANTITIES } from '~~/utils/result-units'
@@ -21,6 +22,8 @@ const props = withDefaults(
   defineProps<{
     /** 总线名称 */
     busLabel: string
+    /** 总线短编码（用于定位本总线松弛量，可选） */
+    busCode?: string
     /** 该总线关联的变量名列表，如 ["E_WT_out_7e8a", "E_ES_in_7e77"] */
     variables: string[]
     /** 全量时序数据: { "WT_7e8a|E_WT_out_7e8a": { "1": [{ts, value}] } } */
@@ -167,18 +170,10 @@ const dateRangeStartMinutes = computed(() => props.displayWindow.dateStart)
 const dateRangeEndMinutes = computed(() => props.displayWindow.dateEnd)
 const rangeStartMinutes = computed(() => props.displayWindow.start)
 const rangeEndMinutes = computed(() => props.displayWindow.end)
-const formatTimelineLabel = (minute: number): string => formatCalendarMinute(props.simStartDate, minute)
-
 function emitWindow(next: ChartDisplayWindow): void {
   emit('update:displayWindow', next)
 }
 
-const updateRangeStart = (value: number): void => {
-  emitWindow({ ...props.displayWindow, start: value })
-}
-const updateRangeEnd = (value: number): void => {
-  emitWindow({ ...props.displayWindow, end: value })
-}
 const updateDateRangeStart = (value: number): void => {
   emitWindow({
     dateStart: value,
@@ -195,6 +190,20 @@ const updateDateRangeEnd = (value: number): void => {
     end: value
   })
 }
+
+const zoomDomain = computed(() => ({
+  start: dateRangeStartMinutes.value,
+  end: Math.max(dateRangeStartMinutes.value + 1, dateRangeEndMinutes.value)
+}))
+
+const sharedZoom = useSharedDataZoom({
+  getChart: () => chartInstance,
+  getWindow: () => ({ start: rangeStartMinutes.value, end: rangeEndMinutes.value }),
+  getDomain: () => zoomDomain.value,
+  onWindowChange: (win) => {
+    emitWindow({ ...props.displayWindow, start: win.start, end: win.end })
+  }
+})
 
 // ───── 累计电量/热量/氢量贡献度：源/荷分别计算 ─────
 
@@ -320,11 +329,18 @@ function sumDeviceSeries(codes: string[], source: RenewableKind): { output: numb
   return { output, cut, available }
 }
 
-interface RenewableMetricItem {
+interface MetricSegment {
+  text: string
+  tone?: 'danger' | 'info' | 'default'
+}
+
+interface EnergyMetricItem {
   key: string
   label: string
   value: string
   unit: string
+  /** 多段展示（如弃风量/率、稳定性红蓝）；有值时优先于 value */
+  segments?: MetricSegment[]
 }
 
 function formatRate(numerator: number, denominator: number): string {
@@ -332,48 +348,143 @@ function formatRate(numerator: number, denominator: number): string {
   return (numerator / denominator * 100).toFixed(2)
 }
 
-const renewableMetrics = computed<RenewableMetricItem[]>(() => {
+/** 稳定性 = 100% − 缺额/过剩电量占对应供需总量的比例。 */
+function formatStability(slackEnergy: number, totalEnergy: number): string {
+  if (totalEnergy <= 0) return '—'
+  const slackRate = slackEnergy / totalEnergy * 100
+  return Math.min(100, Math.max(0, 100 - slackRate)).toFixed(2)
+}
+
+function formatAmountRate(amount: number, rateDenominator: number, hasDevice: boolean): { text: string; unit: string } {
+  if (!hasDevice) return { text: '—/—', unit: '' }
+  const amountText = formatEnergy(amount)
+  const rateText = formatRate(amount, rateDenominator)
+  return {
+    text: `${amountText} kWh / ${rateText}%`,
+    unit: '',
+  }
+}
+
+/** 源侧水电：E_HYDRO_{code} */
+const hydroDeviceCodes = computed(() => {
+  const codes = new Set<string>()
+  for (const varName of sourceVars.value) {
+    const m = /^E_HYDRO_([A-Za-z0-9]+)$/.exec(varName)
+    if (m) codes.add(m[1]!)
+  }
+  return [...codes]
+})
+
+function sumHydroOutput(): number {
+  let total = 0
+  for (const code of hydroDeviceCodes.value) {
+    total += integrateResultVar(`E_HYDRO_${code}`)
+  }
+  return total
+}
+
+/** 购入电量/量：本总线电网/氢网购入（GRID_out / HGRID_out） */
+function sumPurchaseEnergy(): number {
+  let total = 0
+  for (const varName of sourceVars.value) {
+    if (/^E_GRID_out(?:_|$)/.test(varName) || /^H_HGRID_out(?:_|$)/.test(varName)) {
+      total += integrateResultVar(varName)
+    }
+  }
+  return total
+}
+
+/** 本总线介质前缀：电 E_ / 氢 H_ / 热 Q_ */
+function slackVarPrefix(): string {
+  const medium = getResultFlowMedium(props.variables[0] ?? '')
+  if (medium === 'hydrogen') return 'H_'
+  if (medium === 'thermal') return 'Q_'
+  return 'E_'
+}
+
+/** 松弛量：缺额/过剩（单独统计，不进入扇形图与明细） */
+function sumSlackEnergies(): { shortage: number; excess: number } {
+  const prefix = slackVarPrefix()
+  const code = (props.busCode ?? '').trim()
+  const withCode = (base: string): number => {
+    if (!code) return integrateResultVar(base)
+    const named = integrateResultVar(`${base}_${code}`)
+    return named || integrateResultVar(base)
+  }
+  return {
+    shortage: withCode(`${prefix}SHORTAGE`),
+    excess: withCode(`${prefix}EXCESS`),
+  }
+}
+
+const energyMetrics = computed<EnergyMetricItem[]>(() => {
   const wind = sumDeviceSeries(renewableDeviceCodes.value.wt, 'WT')
   const solar = sumDeviceSeries(renewableDeviceCodes.value.pv, 'PV')
+  const hasWind = renewableDeviceCodes.value.wt.length > 0
+  const hasSolar = renewableDeviceCodes.value.pv.length > 0
+  const hasHydro = hydroDeviceCodes.value.length > 0
+
   const usedEnergy = wind.output + solar.output
   const availableEnergy = wind.available + solar.available
+  const greenEnergy = wind.output + solar.output + sumHydroOutput()
+  const purchaseEnergy = sumPurchaseEnergy()
+  const slack = sumSlackEnergies()
+
+  const windPair = formatAmountRate(wind.cut, wind.available, hasWind)
+  const solarPair = formatAmountRate(solar.cut, solar.available, hasSolar)
+
+  const greenRate = formatRate(greenEnergy, sourceTotal.value)
+  const purchaseRate = formatRate(purchaseEnergy, sourceTotal.value)
+  // 缺额与过剩分开评估：缺额相对总发电量，过剩相对总用电量。
+  const shortageStability = formatStability(slack.shortage, sourceTotal.value)
+  const excessStability = formatStability(slack.excess, sinkTotal.value)
+
   return [
     {
-      key: 'wind-cut-energy',
-      label: '弃风量',
-      value: formatEnergy(wind.cut),
-      unit: 'kWh',
+      key: 'wind-cut',
+      label: '弃风量/弃风率',
+      value: windPair.text,
+      unit: windPair.unit,
     },
     {
-      key: 'wind-cut-rate',
-      label: '弃风率',
-      value: formatRate(wind.cut, wind.available),
-      unit: '%',
-    },
-    {
-      key: 'solar-cut-energy',
-      label: '弃光量',
-      value: formatEnergy(solar.cut),
-      unit: 'kWh',
-    },
-    {
-      key: 'solar-cut-rate',
-      label: '弃光率',
-      value: formatRate(solar.cut, solar.available),
-      unit: '%',
+      key: 'solar-cut',
+      label: '弃光量/弃光率',
+      value: solarPair.text,
+      unit: solarPair.unit,
     },
     {
       key: 're-utilization',
       label: '新能源利用率',
-      value: formatRate(usedEnergy, availableEnergy),
+      value: hasWind || hasSolar ? formatRate(usedEnergy, availableEnergy) : '—',
       unit: '%',
-    }
+    },
+    {
+      key: 'green-share',
+      label: '绿电占比',
+      value: greenRate,
+      unit: '%',
+    },
+    {
+      key: 'purchase-share',
+      label: '购能占比',
+      value: purchaseRate,
+      unit: '%',
+    },
+    {
+      key: 'stability',
+      label: '稳定性',
+      value: `${shortageStability} / ${excessStability}`,
+      unit: '%',
+      segments: [
+        { text: shortageStability, tone: 'danger' },
+        { text: '/', tone: 'default' },
+        { text: excessStability, tone: 'info' },
+      ],
+    },
   ]
 })
 
-const hasRenewableDevices = computed(() => (
-  renewableDeviceCodes.value.wt.length > 0 || renewableDeviceCodes.value.pv.length > 0
-))
+// 明细区常显（可为空）
 
 // ───── 明细：源/荷环形图与对应介质的累计量构成 ─────
 
@@ -488,13 +599,14 @@ const renderChart = () => {
 
   const startMin = rangeStartMinutes.value
   const endMin = rangeEndMinutes.value
+  const domain = zoomDomain.value
 
-  // 收集所有时间戳
+  // 收集所有时间戳（序列覆盖日期粗窗；细窗由 dataZoom 控制）
   const allTsSet = new Set<number>()
   for (const varName of props.variables) {
     const data = getVarData(varName).filter(p => {
       const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
+      return m >= domain.start && m < domain.end
     })
     data.forEach(p => allTsSet.add(timeLabelToMinutes(p.ts)))
   }
@@ -516,7 +628,7 @@ const renderChart = () => {
   for (const varName of sourceVars.value) {
     const data = getVarData(varName).filter(p => {
       const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
+      return m >= domain.start && m < domain.end
     })
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), p.value]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
@@ -534,7 +646,7 @@ const renderChart = () => {
   for (const varName of displayedSinkVars.value) {
     const data = getVarData(varName).filter(p => {
       const m = timeLabelToMinutes(p.ts)
-      return m >= startMin && m < endMin
+      return m >= domain.start && m < domain.end
     })
     const dataMap = new Map(data.map(p => [timeLabelToMinutes(p.ts), -Math.abs(p.value)]))
     const barData = allTs.map(m => dataMap.get(m) ?? 0)
@@ -554,7 +666,7 @@ const renderChart = () => {
     for (const varName of loadVars.value) {
       const data = getVarData(varName).filter(p => {
         const m = timeLabelToMinutes(p.ts)
-        return m >= startMin && m < endMin
+        return m >= domain.start && m < domain.end
       })
       for (const point of data) {
         const minute = timeLabelToMinutes(point.ts)
@@ -590,7 +702,8 @@ const renderChart = () => {
       itemHeight: 10,
       textStyle: { fontSize: 14, color: '#475467' }
     },
-    grid: { left: 82, right: 22, top: CHART_GRID_TOP + 8, bottom: CHART_GRID_BOTTOM + 10, containLabel: false },
+    grid: { left: 82, right: 22, top: CHART_GRID_TOP + 8, bottom: CHART_GRID_BOTTOM + 28, containLabel: false },
+    dataZoom: sharedZoom.buildDataZoom(),
     xAxis: {
       type: 'category',
       data: xLabels,
@@ -645,6 +758,7 @@ const renderChart = () => {
     },
     animation: false
   }, true)
+  sharedZoom.attachDataZoomEvents()
 }
 
 watch(
@@ -662,6 +776,7 @@ watch(
     const t0 = performance.now()
     renderChart()
     renderDetailCharts()
+    sharedZoom.syncDataZoomFromWindow()
     const ms = performance.now() - t0
     if (ms > 50) {
       console.info(`[Probe] EnergyFlowChart render ${ms.toFixed(0)}ms`)
@@ -693,7 +808,7 @@ onBeforeUnmount(() => {
 <template>
   <div ref="containerRef" class="space-y-3">
     <div class="flex items-center justify-between gap-4 px-1">
-      <h3 class="text-base font-medium text-app-text">{{ busLabel }} · {{ flowQuantity.rateLabel }}</h3>
+      <h3 class="text-base font-medium text-app-text">{{ busLabel }} - {{ flowQuantity.rateLabel }}</h3>
       <AppButton
         :label="showDetails ? '收起明细' : '查看明细'"
         tone="primary"
@@ -715,16 +830,6 @@ onBeforeUnmount(() => {
         @update:start="updateDateRangeStart"
         @update:end="updateDateRangeEnd"
       />
-      <PrimaryDualRangeSlider
-        :start="rangeStartMinutes"
-        :end="rangeEndMinutes"
-        :min="dateRangeStartMinutes"
-        :max="dateRangeEndMinutes"
-        :step="sliderStepMinutes"
-        :format-label="formatTimelineLabel"
-        @update:start="updateRangeStart"
-        @update:end="updateRangeEnd"
-      />
     </div>
 
     <div v-show="showDetails" class="space-y-4 border-t border-app-border pt-4">
@@ -733,20 +838,35 @@ onBeforeUnmount(() => {
         <div ref="sinkDonutRef" class="h-[320px] rounded-[8px] bg-white" />
       </div>
 
-      <div v-if="hasRenewableDevices" class="overflow-hidden rounded-[8px] border border-app-border bg-white">
+      <div class="overflow-hidden rounded-[8px] border border-app-border bg-white">
         <div class="border-b border-app-border bg-app-panel-soft px-4 py-3">
-          <h4 class="text-sm font-medium text-app-text">新能源消纳指标</h4>
+          <h4 class="text-sm font-medium text-app-text">运行指标</h4>
         </div>
-        <div class="grid grid-cols-2 gap-px bg-app-border md:grid-cols-3 xl:grid-cols-5">
+        <div class="grid grid-cols-2 gap-px bg-app-border md:grid-cols-3 xl:grid-cols-6">
           <div
-            v-for="item in renewableMetrics"
+            v-for="item in energyMetrics"
             :key="item.key"
             class="bg-white px-4 py-3"
           >
             <div class="text-xs text-app-muted">{{ item.label }}</div>
             <div class="mt-1 flex items-baseline gap-1">
-              <span class="text-lg font-semibold text-app-text">{{ item.value }}</span>
-              <span class="text-xs text-app-muted">{{ item.unit }}</span>
+              <template v-if="item.segments && item.segments.length">
+                <span
+                  v-for="(seg, segIndex) in item.segments"
+                  :key="`${item.key}-${segIndex}`"
+                  class="text-lg font-semibold"
+                  :class="seg.tone === 'danger'
+                    ? 'text-red-600'
+                    : seg.tone === 'info'
+                      ? 'text-blue-600'
+                      : 'text-app-text'"
+                >{{ seg.text }}</span>
+                <span v-if="item.unit" class="text-xs text-app-muted">{{ item.unit }}</span>
+              </template>
+              <template v-else>
+                <span class="text-lg font-semibold text-app-text">{{ item.value }}</span>
+                <span v-if="item.unit" class="text-xs text-app-muted">{{ item.unit }}</span>
+              </template>
             </div>
           </div>
         </div>

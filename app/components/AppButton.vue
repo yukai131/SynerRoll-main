@@ -2,7 +2,6 @@
 const props = withDefaults(
   defineProps<{
     label?: string
-    icon?: string
     type?: 'button' | 'submit'
     size?: 'sm' | 'md'
     tone?: 'primary' | 'neutral' | 'ghost' | 'danger' | 'green'
@@ -12,7 +11,6 @@ const props = withDefaults(
   }>(),
   {
     label: '',
-    icon: '',
     type: 'button',
     size: 'md',
     tone: 'neutral',
@@ -60,7 +58,6 @@ const displayLabel = computed(() => {
       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" />
       <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
     </svg>
-    <AppIcon v-else-if="icon" :name="icon" :size="16" />
     <span v-if="displayLabel">{{ displayLabel }}</span>
     <slot />
   </button>

@@ -7,6 +7,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { backendDataDir } from './backend-data.ts'
 
 export interface TaskRow {
   id: string
@@ -63,19 +64,6 @@ export interface SeriesReadOptions {
   sourceId?: string
   varName?: string
   remark?: string
-}
-
-function backendDataDir(): string {
-  // Nuxt 以项目根为 cwd；兼容打包后相对 backend/data
-  const candidates = [
-    process.env.SYNERROLL_DATA_DIR,
-    join(process.cwd(), 'backend', 'data'),
-    join(process.cwd(), '..', 'backend', 'data'),
-  ].filter(Boolean) as string[]
-  for (const dir of candidates) {
-    if (existsSync(join(dir, 'tasks.db'))) return dir
-  }
-  return join(process.cwd(), 'backend', 'data')
 }
 
 export function tasksDbPath(): string {

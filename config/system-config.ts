@@ -16,6 +16,12 @@ export interface ToolbarActionConfig {
   options?: { label: string; value: string }[]
 }
 
+/** 工具栏按钮角标：数字 / 小字 / 彩色状态点 */
+export type ToolbarButtonStatus =
+  | { kind: 'count'; value: number }
+  | { kind: 'text'; value: string }
+  | { kind: 'dot'; tone: 'green' | 'gray' | 'red' | 'blue'; blink?: boolean }
+
 export interface ToolbarGroupConfig {
   key: string
   label: string

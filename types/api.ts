@@ -109,6 +109,7 @@ export interface CreateTaskRequest {
   simStartDate?: string | null
   simEndDate?: string | null
   name?: string | null
+  flexibility?: FlexibilityTaskConfig
 }
 
 export interface TaskDataRow {
@@ -222,6 +223,20 @@ export interface EconomyEvaluationResult {
 
 
 // ───── 灵活性评估 ─────
+export type FlexibilityOperationMode =
+  | 'economic_operation'
+  | 'renewable_consumption'
+  | 'renewable_smoothing'
+  | 'agc_tracking'
+  | 'flexibility_enhancement'
+
+export type FlexibilityRequirementSource =
+  | 'net_load_change'
+  | 'agc_or_schedule'
+  | 'user_defined'
+
+export type FlexibilityValueSpec = number | Record<string, number>
+
 export interface FlexibilityPeriodResult {
   timestamp: string
   timestamp_minutes?: number
@@ -248,9 +263,18 @@ export interface FlexibilitySummaryResult {
 export interface FlexibilityTaskConfig {
   enabled: boolean
   layerId?: string
-  requirementSource?: string
-  networkMode?: string
-  [key: string]: unknown
+  applicationType?: string
+  operationMode?: string
+  boundaryCondition?: string
+  requirementSource?: FlexibilityRequirementSource
+  networkMode?: 'auto' | 'grid_connected' | 'islanded'
+  poiId?: string | null
+  targetPoiPowerKw?: FlexibilityValueSpec
+  targetPoiPowerBoundaryId?: string
+  upwardRequirementKw?: FlexibilityValueSpec
+  downwardRequirementKw?: FlexibilityValueSpec
+  upwardRequirementBoundaryId?: string
+  downwardRequirementBoundaryId?: string
 }
 
 export interface TaskFlexibilityResponse {

@@ -16,7 +16,15 @@ function capacity_worker_main(planning_id::String)
             Dict{String,Any}("pid" => getpid()))
         run_capacity_optimization!(planning_id, ctx)
     catch error
-        if error isa PlanningCancelled
+        if error isa PlanningTimeLimit
+            try
+                complete_planning_from_evaluations!(planning_id;
+                    stop_reason="已达到规划总时限（不含启动和编译），返回已完整评价候选中的最佳方案。")
+            catch
+                set_planning_status!(planning_id, "failed"; error_code="PLANNING_TIME_LIMIT",
+                    error_message="已达到规划总时限（不含启动和编译）且尚无完整可行候选。")
+            end
+        elseif error isa PlanningCancelled
             set_planning_status!(planning_id, "cancelled")
         else
             code = error isa CapacityPlanningError ? error.code : "PLANNING_FAILED"
@@ -25,6 +33,7 @@ function capacity_worker_main(planning_id::String)
             @error "capacity worker failed" planning_id exception=(error, catch_backtrace())
         end
     finally
+        finish_planning_budget!()
         perf_finish("planning", planning_id)
     end
 end

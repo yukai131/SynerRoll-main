@@ -10,6 +10,7 @@ const PLANNING_DATA_ROOT = joinpath(BACKEND_DATA_DIR, "capacity-planning")
 const PLANNING_STORE_LOCK = ReentrantLock()
 const PLANNING_STORE_REF = Ref{Union{Nothing,SQLite.DB}}(nothing)
 const PLANNING_TERMINAL_STATUSES = Set(["completed", "failed", "cancelled"])
+const PLANNING_DELETABLE_STATUSES = union(PLANNING_TERMINAL_STATUSES, Set(["draft"]))
 
 # per-task 场景数据库缓存
 const SCENARIO_STORE_LOCK = ReentrantLock()
@@ -391,17 +392,44 @@ end
 function delete_planning_record!(planning_id::String)
     task = get_planning_task(planning_id)
     task === nothing && error("规划任务不存在: $(planning_id)")
-    task["status"] in PLANNING_TERMINAL_STATUSES || error("只能删除已完成、失败或取消的规划任务")
+    task["status"] in PLANNING_DELETABLE_STATUSES || error("只能清理草稿、已完成、失败或已取消的规划任务")
+    directory = planning_task_dir(planning_id)
+
+    # 先从缓存摘除并关闭 per-task scenarios.db，避免 Windows 文件锁阻止目录删除。
+    scenario_store = lock(SCENARIO_STORE_LOCK) do
+        pop!(SCENARIO_STORE_REFS, planning_id, nothing)
+    end
+    if scenario_store !== nothing
+        scenario_db, scenario_lock = scenario_store
+        lock(scenario_lock) do
+            try
+                DBInterface.close!(scenario_db)
+            catch error
+                @debug "容量规划场景数据库关闭失败或已关闭" planning_id exception=error
+            end
+        end
+    end
+
+    # 候选计算目录中的 timeseries.db 也可能仍在全局 registry 中。
+    directory_abs = abspath(directory)
+    directory_prefix = directory_abs * string(Base.Filesystem.path_separator)
+    cached_paths = lock(STORE_REGISTRY_LOCK) do
+        [path for path in keys(STORE_REGISTRY) if begin
+            path_abs = abspath(path)
+            path_abs == directory_abs || startswith(path_abs, directory_prefix)
+        end]
+    end
+    for path in cached_paths
+        close_store(path)
+    end
+
+    remove_tree_with_retry(directory)
+
+    # 计算数据确认删除后再删除主记录，外键级联清除场景、候选和结果行。
     db = get_planning_store()
     lock(PLANNING_STORE_LOCK) do
         _exec(db, "DELETE FROM planning_tasks WHERE id=?", (planning_id,))
     end
-    # 清理 per-task 场景数据库缓存
-    lock(SCENARIO_STORE_LOCK) do
-        delete!(SCENARIO_STORE_REFS, planning_id)
-    end
-    directory = planning_task_dir(planning_id)
-    isdir(directory) && rm(directory; recursive=true, force=true)
     return nothing
 end
 

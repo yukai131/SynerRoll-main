@@ -1,6 +1,5 @@
 /**
  * 计算任务 WebSocket 订阅 composable
- * 文档：docs/compute-task-architecture.md § 14
  *
  * 直连 Julia 后端（不走 BFF，BFF 不代理 WebSocket）。
  * Julia 默认监听在 8080 端口（与 HTTP 共享），路径 /ws/task/:id。
@@ -31,13 +30,9 @@ export const useTaskWebSocket = () => {
     const url = `${wsBase}/ws/task/${taskId}`
 
     let ws: WebSocket | null = null
-    let closed = false
 
     if (import.meta.client) {
       ws = new WebSocket(url)
-      ws.onopen = () => {
-        // console.log('[TaskWS] connected:', url)
-      }
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data)
@@ -51,16 +46,9 @@ export const useTaskWebSocket = () => {
         console.warn('[TaskWS] error:', err)
         onEvent({ type: 'error', message: 'WebSocket 连接错误' })
       }
-      ws.onclose = () => {
-        // console.log('[TaskWS] disconnected:', url)
-        if (!closed) {
-          // 可选：自动重连
-        }
-      }
     }
 
     const close = () => {
-      closed = true
       if (ws) {
         try { ws.close() } catch {}
         ws = null

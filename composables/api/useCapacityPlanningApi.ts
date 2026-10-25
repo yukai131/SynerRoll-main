@@ -73,8 +73,18 @@ export const useCapacityPlanningApi = () => {
       method: 'POST'
     })
 
+  const cleanupPlanning = (planningId: string) =>
+    apiClient.mutate<{ planningId: string }>(`/capacity-planning/${encodeURIComponent(planningId)}`, {
+      method: 'DELETE'
+    })
+
   const getPlanning = (planningId: string) =>
     apiClient.get<CapacityPlanningTask>(`/capacity-planning/${encodeURIComponent(planningId)}`)
+
+  const getPlanningScenarios = (planningId: string) =>
+    apiClient.get<ScenarioPreviewResult>(
+      `/capacity-planning/${encodeURIComponent(planningId)}/scenarios`
+    )
 
   const getPlanningResult = (planningId: string) =>
     apiClient.get<CapacityPlanningResult>(`/capacity-planning/${encodeURIComponent(planningId)}/result`)
@@ -143,7 +153,9 @@ export const useCapacityPlanningApi = () => {
     createPlanning,
     startPlanning,
     cancelPlanning,
+    cleanupPlanning,
     getPlanning,
+    getPlanningScenarios,
     getPlanningResult,
     getPlanningComparison,
     listPlannings,

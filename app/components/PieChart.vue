@@ -9,7 +9,11 @@ const props = defineProps<{
   title?: string
   items: PieItem[]
   unit?: string
+  /** 扇区显示尺寸，默认 md */
+  size?: 'md' | 'lg'
 }>()
+
+const pieSizeClass = computed(() => (props.size === 'lg' ? 'h-64 w-64' : 'h-44 w-44'))
 
 const total = computed(() => props.items.reduce((sum, item) => sum + item.value, 0) || 1)
 const hoveredItem = ref<PieItem | null>(null)
@@ -69,8 +73,8 @@ const segments = computed(() => {
     <div v-if="title" class="mb-2">
       <h3 class="bg-gray-100 p-2 text-sm text-app-text">{{ title }}</h3>
     </div>
-    <div class="flex items-center gap-4">
-      <svg viewBox="0 0 180 180" class="h-44 w-44 shrink-0">
+    <div class="flex items-center justify-center gap-6">
+      <svg viewBox="0 0 180 180" class="shrink-0" :class="pieSizeClass">
         <path
           v-for="segment in segments"
           :key="segment.label"
